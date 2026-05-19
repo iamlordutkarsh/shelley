@@ -689,6 +689,19 @@ function TerminalInstanceWithRegistry({
     fitAddon.fit();
     onRegister(term.id, xterm);
 
+    // Mobile soft-keyboard fix: on touch devices the xterm helper textarea
+    // can't be focused by tapping (it has pointer-events: none so the
+    // viewport remains scrollable). Listen for pointerdown inside the
+    // terminal area and focus xterm programmatically — this happens inside
+    // a user gesture, which is what iOS/Android require to open the keyboard.
+    const handlePointerDown = (e: PointerEvent) => {
+      // Only handle touch — pen/stylus shouldn't auto-summon the OSK, and
+      // mouse already focuses xterm through its own handlers.
+      if (e.pointerType !== "touch") return;
+      xterm.focus();
+    };
+    containerRef.current.addEventListener("pointerdown", handlePointerDown);
+
     // Show the command as a banner so users can see and copy/paste what they
     // ran. Written client-side on every attach (the xterm buffer is fresh on
     // each mount, so there's no duplication).
@@ -757,8 +770,10 @@ function TerminalInstanceWithRegistry({
     });
     ro.observe(containerRef.current);
 
+    const container = containerRef.current;
     return () => {
       ro.disconnect();
+      container?.removeEventListener("pointerdown", handlePointerDown);
       ws.close();
       xterm.dispose();
       onUnregister(term.id);

@@ -7326,6 +7326,34 @@ kbd {
   inset: 4px;
 }
 
+@media (pointer: coarse) {
+  /* xterm.js positions its helper textarea off-screen with zero dimensions
+     (left: -9999em; width/height: 0), so on iOS/Android focus() doesn't open
+     the soft keyboard. Pull it back on-screen and give it real dimensions so
+     focus() inside a touch gesture (see TerminalPanel's pointerdown handler)
+     reliably opens the keyboard. pointer-events: none keeps touches passing
+     through to the terminal for native scrolling. */
+  .terminal-panel .xterm .xterm-helpers {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    pointer-events: none !important;
+  }
+  .terminal-panel .xterm .xterm-helper-textarea {
+    left: 0 !important;
+    top: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    pointer-events: none !important;
+    /* Stay invisible while still being focusable. */
+    opacity: 0 !important;
+    /* iOS auto-zooms inputs whose font-size is < 16px; prevent that. */
+    font-size: 16px !important;
+  }
+}
+
 /* Highlight animation for navigated user messages */
 @keyframes message-nav-highlight {
   0% {
