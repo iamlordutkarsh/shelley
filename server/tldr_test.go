@@ -160,6 +160,7 @@ func TestAttachTLDR_MergesAndBroadcasts(t *testing.T) {
 }
 
 func TestEndOfTurnTLDR_AttachedForLongResponse(t *testing.T) {
+	t.Skip("TL;DR generation is currently disabled at the call site in server.go")
 	t.Parallel()
 	h := NewTestHarness(t)
 	long := strings.Repeat("This is a long sentence that takes a fair bit of space. ", 8)
