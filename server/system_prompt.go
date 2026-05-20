@@ -188,17 +188,26 @@ type NewConversationHookResult struct {
 	Slug   string
 }
 
-// RunNewConversationHook runs the new-conversation hook if it exists.
-// It returns the (possibly modified) mutable fields.
-// If the hook doesn't exist or fails, the original values are returned unchanged.
+// RunNewConversationHook runs the new-conversation hook from the
+// default user hooks directory ($HOME/.config/shelley/hooks). Tests
+// that want to invoke a hook script from a temp directory should
+// call RunNewConversationHookIn directly, which avoids the
+// process-wide $HOME env var (concurrent tests that share a Server
+// would otherwise race on it).
 func RunNewConversationHook(input NewConversationHookInput) NewConversationHookResult {
+	return RunNewConversationHookIn(defaultHooksDir(), input)
+}
+
+// RunNewConversationHookIn is the dir-explicit variant of
+// RunNewConversationHook.
+func RunNewConversationHookIn(hooksDir string, input NewConversationHookInput) NewConversationHookResult {
 	original := NewConversationHookResult{
 		Prompt: input.Prompt,
 		Model:  input.Model,
 		Cwd:    input.Cwd,
 	}
 
-	hookPath, err := findHook(hookNewConversation)
+	hookPath, err := findHookIn(hooksDir, hookNewConversation)
 	if err != nil {
 		slog.Error("new-conversation hook: findHook failed", "error", err)
 		return original
@@ -289,12 +298,20 @@ type EndOfTurnHookInput struct {
 	FinalResponse   string `json:"final_response,omitempty"`
 }
 
-// RunEndOfTurnHook fires the end-of-turn hook if it exists. It runs the hook
-// with the event JSON on stdin and ignores stdout. Failures are logged and
-// non-fatal: the hook is purely a side-channel for local automation (like
-// playing a sound or sending a desktop notification).
+// RunEndOfTurnHook fires the end-of-turn hook from the default user
+// hooks directory ($HOME/.config/shelley/hooks). See RunEndOfTurnHookIn
+// for the dir-explicit variant used by tests.
 func RunEndOfTurnHook(input EndOfTurnHookInput) {
-	hookPath, err := findHook(hookEndOfTurn)
+	RunEndOfTurnHookIn(defaultHooksDir(), input)
+}
+
+// RunEndOfTurnHookIn runs the end-of-turn hook from an explicit
+// hooks directory. It runs the hook with the event JSON on stdin
+// and ignores stdout. Failures are logged and non-fatal: the hook
+// is purely a side-channel for local automation (sound, desktop
+// notification, etc).
+func RunEndOfTurnHookIn(hooksDir string, input EndOfTurnHookInput) {
+	hookPath, err := findHookIn(hooksDir, hookEndOfTurn)
 	if err != nil {
 		slog.Error("end-of-turn hook: findHook failed", "error", err)
 		return
@@ -325,17 +342,32 @@ func RunEndOfTurnHook(input EndOfTurnHookInput) {
 	slog.Info("end-of-turn hook applied", "hook", hookPath, "conversationID", input.ConversationID)
 }
 
-// findHook returns the path to the hook if it exists and is executable,
-// or empty string if not found.
+// defaultHooksDir is $HOME/.config/shelley/hooks, or "" if $HOME is
+// not set. Resolved on each call so that, e.g., a test that swaps
+// $HOME locally still sees its change.
+func defaultHooksDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "shelley", "hooks")
+}
+
+// findHook is a thin wrapper around findHookIn for the default hooks dir.
 func findHook(name string) (string, error) {
+	return findHookIn(defaultHooksDir(), name)
+}
+
+// findHookIn returns the path to the named hook inside dir if it
+// exists and is executable, or "" if not found.
+func findHookIn(dir, name string) (string, error) {
 	if filepath.Base(name) != name {
 		return "", fmt.Errorf("invalid hook name: %q", name)
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
+	if dir == "" {
+		return "", nil
 	}
-	hookPath := filepath.Join(home, ".config", "shelley", "hooks", name)
+	hookPath := filepath.Join(dir, name)
 	info, err := os.Stat(hookPath)
 	if os.IsNotExist(err) {
 		return "", nil

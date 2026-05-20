@@ -1187,7 +1187,7 @@ func (s *Server) handleNewConversation(w http.ResponseWriter, r *http.Request) {
 	conversationID := conversation.ConversationID
 
 	// Run new-conversation hook, which may override prompt, model, and cwd
-	hookResult := RunNewConversationHook(NewConversationHookInput{
+	hookResult := RunNewConversationHookIn(s.hooksDir, NewConversationHookInput{
 		Prompt: req.Message,
 		Model:  modelID,
 		Cwd:    derefString(cwdPtr),

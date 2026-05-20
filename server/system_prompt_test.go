@@ -871,28 +871,25 @@ echo '{"slug": "Hello World!"}'`
 }
 
 func TestRunEndOfTurnHookNoHook(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
 	// Should be a no-op and not panic.
-	RunEndOfTurnHook(EndOfTurnHookInput{ConversationID: "abc"})
+	RunEndOfTurnHookIn(t.TempDir(), EndOfTurnHookInput{ConversationID: "abc"})
 }
 
 func TestRunEndOfTurnHookReceivesJSON(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	hookDir := filepath.Join(home, ".config", "shelley", "hooks")
-	if err := os.MkdirAll(hookDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	dumpFile := filepath.Join(home, "end-of-turn.json")
-	hookPath := filepath.Join(hookDir, "end-of-turn")
+	// Use an explicit per-test hooks dir rather than t.Setenv("HOME"):
+	// $HOME is process-wide and other tests in this package fire the
+	// end-of-turn hook in background goroutines (via RunEndOfTurnHook
+	// at end-of-turn in predictable-model conversations). Those would
+	// race with this test's hook script and clobber dumpFile.
+	hooksDir := t.TempDir()
+	dumpFile := filepath.Join(t.TempDir(), "end-of-turn.json")
+	hookPath := filepath.Join(hooksDir, "end-of-turn")
 	script := "#!/bin/sh\ncat > " + dumpFile + "\n"
 	if err := os.WriteFile(hookPath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	RunEndOfTurnHook(EndOfTurnHookInput{
+	RunEndOfTurnHookIn(hooksDir, EndOfTurnHookInput{
 		Type:            "end_of_turn",
 		ConversationID:  "conv-789",
 		Hostname:        "phil-dev",
@@ -903,7 +900,6 @@ func TestRunEndOfTurnHookReceivesJSON(t *testing.T) {
 		FinalResponse:   "all done",
 	})
 
-	// RunEndOfTurnHook is synchronous, so the file is already on disk.
 	data, err := os.ReadFile(dumpFile)
 	if err != nil {
 		t.Fatalf("failed to read hook input: %v", err)
@@ -926,19 +922,13 @@ func TestRunEndOfTurnHookReceivesJSON(t *testing.T) {
 }
 
 func TestRunEndOfTurnHookFailureIsNonFatal(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	hookDir := filepath.Join(home, ".config", "shelley", "hooks")
-	if err := os.MkdirAll(hookDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	hookPath := filepath.Join(hookDir, "end-of-turn")
+	hooksDir := t.TempDir()
+	hookPath := filepath.Join(hooksDir, "end-of-turn")
 	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// Just make sure it doesn't panic.
-	RunEndOfTurnHook(EndOfTurnHookInput{ConversationID: "abc"})
+	RunEndOfTurnHookIn(hooksDir, EndOfTurnHookInput{ConversationID: "abc"})
 }
 
 func TestExeDevDefaultPortUsesInjectableClient(t *testing.T) {

@@ -270,6 +270,13 @@ type Server struct {
 	shutdownCh               chan struct{} // Signals background routines to stop
 	listenPort               int           // TCP port the server is listening on
 	terminals                *TerminalSessions
+
+	// hooksDir is the directory searched for user hook scripts
+	// (end-of-turn, new-conversation). Defaults to
+	// $HOME/.config/shelley/hooks; tests override it to a per-test
+	// temp dir to avoid racing on $HOME with other parallel tests
+	// that invoke hooks via the server.
+	hooksDir string
 }
 
 // NewServer creates a new server instance
@@ -286,6 +293,7 @@ func NewServer(database *db.DB, llmManager LLMProvider, toolSetConfig claudetool
 		versionChecker:      NewVersionChecker(),
 		notifDispatcher:     notifications.NewDispatcher(logger),
 		shutdownCh:          make(chan struct{}),
+		hooksDir:            defaultHooksDir(),
 	}
 
 	s.conversationListStream = newConversationListStream(s)
@@ -1234,7 +1242,7 @@ func (s *Server) publishConversationState(state ConversationState) {
 			for _, hook := range hooks {
 				go s.sendEndOfTurnHook(context.Background(), hook, event)
 			}
-			go RunEndOfTurnHook(EndOfTurnHookInput{
+			go RunEndOfTurnHookIn(s.hooksDir, EndOfTurnHookInput{
 				Type:            "end_of_turn",
 				ConversationID:  event.ConversationID,
 				Timestamp:       event.Timestamp,

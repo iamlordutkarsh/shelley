@@ -41,7 +41,7 @@ func (r *SubagentRunner) RunSubagent(ctx context.Context, conversationID, prompt
 		if convErr != nil {
 			s.logger.Error("Failed to get conversation for new-conversation hook", "error", convErr, "conversationID", conversationID)
 		} else if conv.ParentConversationID != nil {
-			hookResult := RunNewConversationHook(NewConversationHookInput{
+			hookResult := RunNewConversationHookIn(s.hooksDir, NewConversationHookInput{
 				Prompt: prompt,
 				Model:  modelID,
 				Cwd:    derefString(conv.Cwd),
