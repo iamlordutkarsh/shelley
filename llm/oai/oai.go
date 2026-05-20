@@ -220,13 +220,6 @@ var (
 		APIKeyEnv: MistralAPIKeyEnv,
 	}
 
-	GLM47Fireworks = Model{
-		UserName:  "glm-4.7-fireworks",
-		ModelName: "accounts/fireworks/models/glm-4p7",
-		URL:       FireworksURL,
-		APIKeyEnv: FireworksAPIKeyEnv,
-	}
-
 	GLM51Fireworks = Model{
 		UserName:  "glm-5.1-fireworks",
 		ModelName: "accounts/fireworks/models/glm-5p1",
@@ -377,7 +370,6 @@ var ModelsRegistry = []Model{
 	MoonshotKimiK2,
 	MistralMedium,
 	DevstralSmall,
-	GLM47Fireworks,
 	GLM51Fireworks,
 	KimiK26Fireworks,
 	GPTOSS120B,
