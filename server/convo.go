@@ -395,6 +395,16 @@ func (cm *ConversationManager) AcceptUserMessage(ctx context.Context, service ll
 		return false, fmt.Errorf("conversation loop not initialized")
 	}
 
+	// Mark agent as working BEFORE persisting the user message. The
+	// conversation_list_patch stream fires off the Pool.OnCommit hook on
+	// every Tx commit and snapshots conversations.agent_working at that
+	// moment, so we must commit the agent_working=true flip first.
+	// Otherwise the user-message commit's list-patch carries the stale
+	// agent_working=false row that pre-dated this turn, the client applies
+	// it as authoritative, and the working/thinking indicator flickers off
+	// until the agent_working=true commit's patch lands a moment later.
+	cm.SetAgentWorking(true)
+
 	// Record the user message to the database immediately so it appears in the UI,
 	// even if the loop is busy processing a previous request
 	if recordMessage != nil {
@@ -405,9 +415,6 @@ func (cm *ConversationManager) AcceptUserMessage(ctx context.Context, service ll
 	}
 
 	loopInstance.QueueUserMessage(message)
-
-	// Mark agent as working - we just queued work for the loop
-	cm.SetAgentWorking(true)
 
 	return isFirst, nil
 }

@@ -158,9 +158,23 @@ export function connectGlobalStream({
     if (typeof data.context_window_size === "number") {
       messageStore.setContextWindowSize(convId, data.context_window_size);
     }
-    if (data.conversation_state) {
-      messageStore.setAgentWorking(convId, data.conversation_state.working);
-    }
+    // NB: we deliberately do NOT mirror data.conversation_state.working
+    // into messageStore here. The conversation_list_patch stream is the
+    // single authoritative source of truth for agent_working:
+    // server-side recomputeMu serializes patch emission so list patches
+    // arrive in a strict old_hash→new_hash chain, while per-conversation
+    // conversation_state events ride a separate streamPub fan-out and
+    // can race with the list patches at the client. If we let both
+    // update agentWorking, a stale state event from an earlier transition
+    // can stomp a fresher list-patch value — the "thinking pill
+    // stays on / flickers" symptom (iOS hit the mirror image of this
+    // race and fixed it in a4ce86d1f the same way). List patches now
+    // pump the authoritative value via App.handleConversationListPatch.
+    //
+    // We still leave conversation_state in the protocol because the
+    // server's per-conversation /api/conversation/<id>/stream and legacy
+    // iOS clients consume it; this client just no longer trusts it for
+    // working state.
 
     // Transient state
     if (data.tool_progress) {

@@ -940,12 +940,13 @@ async function main(): Promise<void> {
   });
 
   await run(
-    "resetTransient preserves agentWorking from a previously-received conversation_state",
+    "resetTransient preserves agentWorking from a previously-received list patch",
     async () => {
       const s = freshStore();
       const id = "c-reset-state";
-      // conversation_state{true} arrives over the global stream before the
-      // focus effect runs resetTransient(id).
+      // A conversation_list_patch carrying agent_working=true arrives
+      // over the global stream before the focus effect runs
+      // resetTransient(id).
       s.setAgentWorking(id, true);
       s.resetTransient(id);
       assert(

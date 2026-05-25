@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -532,4 +533,120 @@ func TestConversationListPatchStreamOverrunSendsReset(t *testing.T) {
 	if ev.OldHash == nil || *ev.OldHash != resetHash {
 		t.Fatalf("expected OldHash=%q after reset, got %+v", resetHash, ev)
 	}
+}
+
+// TestUserMessageCommitCarriesWorkingTrue verifies that by the time the
+// user-message INSERT commit fires its list-patch, the conversation row
+// already reports agent_working=true. The web UI now treats the
+// conversation_list_patch stream as the single authoritative source of
+// truth for working state, so this ordering is essential: if the
+// user-message commit's list-patch carried the pre-Send working=false
+// snapshot, the UI would briefly drop the thinking indicator (and the
+// Stop button) until the SetAgentWorking(true) commit's patch landed a
+// moment later.
+//
+// Server-side, ConversationManager.AcceptUserMessage now calls
+// SetAgentWorking(true) BEFORE recordMessage. This test guards that
+// ordering against regressions by replaying every patch the stream
+// emitted after Send and asserting that no patch with a max_sequence_id
+// bump ever reports working=false.
+func TestUserMessageCommitCarriesWorkingTrue(t *testing.T) {
+	t.Parallel()
+	server, database, _ := newTestServer(t)
+	conv, err := database.CreateConversation(context.Background(), nil, true, nil, nil, db.ConversationOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Force Hydrate (and its system-prompt insert + model write) to commit
+	// BEFORE we subscribe, so the only post-subscribe writes for this
+	// conversation will come from the Send below. Without this, the
+	// system-prompt insert produces a max_sequence_id bump patch with
+	// working=false that looks like the regression we're guarding against.
+	if _, err := server.getOrCreateConversationManager(context.Background(), conv.ConversationID, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := newFlusherRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/stream2", nil).WithContext(ctx)
+	done := make(chan struct{})
+	go func() {
+		server.handleStream(rec, req)
+		close(done)
+	}()
+	defer func() { cancel(); <-done }()
+
+	// Initial reset.
+	initial := waitForPatchEventAfter(t, rec, "")
+	state := []ConversationWithState{}
+	state = mustApplyPatch(t, state, initial.Patch)
+	if len(state) != 1 || state[0].Working {
+		t.Fatalf("expected idle initial state, got %+v", state)
+	}
+	baselineMaxSeq := state[0].MaxSequenceID
+
+	// delay:1 keeps the agent working long enough that the
+	// SetAgentWorking(false) patch can't race the assertion below.
+	body, _ := json.Marshal(ChatRequest{Message: "delay: 1", Model: "predictable"})
+	chatReq := httptest.NewRequest("POST", "/api/conversation/"+conv.ConversationID+"/chat", strings.NewReader(string(body)))
+	chatReq.Header.Set("Content-Type", "application/json")
+	chatW := httptest.NewRecorder()
+	server.handleChatConversation(chatW, chatReq, conv.ConversationID)
+	if chatW.Code != http.StatusAccepted {
+		t.Fatalf("chat request: expected 202, got %d: %s", chatW.Code, chatW.Body.String())
+	}
+
+	// Walk forward through patches until we see working=true. We must
+	// never observe a list-patch that mentions the new user message
+	// (sequence_id bump, updated_at bump) while still reporting
+	// working=false: that's the regression we're guarding against.
+	// Wait until we've observed enough patches to be confident the
+	// user-message commit has landed: drain forward while there's still
+	// activity, but at minimum until working flips to true.
+	deadline := time.Now().Add(2 * time.Second)
+	prev := initial.NewHash
+	var seen []string
+	sawUserMsgCommit := false
+	for time.Now().Before(deadline) {
+		patch := waitForPatchEventAfter(t, rec, prev)
+		prev = patch.NewHash
+		seen = append(seen, patchSummary(patch.Patch))
+		prevSeq := int64(0)
+		prevWorking := false
+		if len(state) == 1 {
+			prevSeq = state[0].MaxSequenceID
+			prevWorking = state[0].Working
+		}
+		state = mustApplyPatch(t, state, patch.Patch)
+		// The regression we're guarding against: a list-patch transitions
+		// working from true → false, OR introduces a new message while
+		// reporting working=false (a stale snapshot from before
+		// SetAgentWorking(true) committed).
+		if prevWorking && !state[0].Working {
+			t.Fatalf("working transitioned from true → false while agent should still be busy. patches:\n  %s\n\nfull body:\n%s",
+				strings.Join(seen, "\n  "), rec.getString())
+		}
+		if state[0].MaxSequenceID > prevSeq && state[0].MaxSequenceID > baselineMaxSeq {
+			if !state[0].Working {
+				t.Fatalf("new message committed with working=false (max_seq=%d). patches:\n  %s\n\nfull body:\n%s",
+					state[0].MaxSequenceID, strings.Join(seen, "\n  "), rec.getString())
+			}
+			sawUserMsgCommit = true
+		}
+		if sawUserMsgCommit && state[0].Working {
+			return // success
+		}
+	}
+	t.Fatalf("never observed user-message commit with working=true. patches:\n  %s\n\nfull body:\n%s",
+		strings.Join(seen, "\n  "), rec.getString())
+}
+
+func patchSummary(ops []conversationListPatchOp) string {
+	parts := make([]string, len(ops))
+	for i, op := range ops {
+		parts[i] = op.Op + " " + op.Path
+	}
+	return strings.Join(parts, ", ")
 }

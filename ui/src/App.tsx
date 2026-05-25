@@ -449,14 +449,24 @@ function App() {
       }
       // Propagate server-reported max_sequence_id for all conversations in
       // the updated list so ChatInterface can skip unnecessary backfills.
+      //
       // Also mirror the persistent agent_working flag into the transient
-      // store: the conversation_list_patch stream is the DB-commit-hook-driven
-      // authority on agent_working (it always trails the matching DB write
-      // and stays consistent with the persisted row), so this is the right
-      // place to sync the indicator — covers both "reload while working"
-      // (initial list backfill carries agent_working=true) and the brand-new
-      // conversation case (the list patch landing the new row arrives before
-      // ChatInterface's resetTransient focus effect runs).
+      // store. The conversation_list_patch stream is the SINGLE
+      // authoritative source of truth for agent_working: server-side
+      // recomputeMu serializes patch emission so patches arrive in a
+      // strict old_hash→new_hash chain, and the embedded ConversationWithState
+      // is read from the conversations row inside the same recompute. The
+      // alternative path — per-conversation `conversation_state` events
+      // — rides a separate streamPub fan-out and can race with these
+      // list patches at the client, so globalStream no longer trusts it
+      // for working state.
+      //
+      // For this to be safe, every code path that flips agent_working in
+      // the DB must do so BEFORE committing a sibling user-visible Tx that
+      // would otherwise fire a list-patch carrying the stale prior value.
+      // See ConversationManager.AcceptUserMessage (which now calls
+      // SetAgentWorking(true) before recordMessage) for the matching
+      // server-side ordering.
       for (const conv of next) {
         messageStore.setMaxSequenceIdKnown(conv.conversation_id, conv.max_sequence_id);
         messageStore.setAgentWorking(conv.conversation_id, conv.agent_working);
@@ -685,6 +695,18 @@ function App() {
         conversation_options: convOpts,
       });
       const newConversationId = response.conversation_id;
+
+      // Optimistically seed the transient working flag for the new
+      // conversation BEFORE focus-switching to it. ChatInterface's focus
+      // effect runs resetTransient() synchronously when conversationId
+      // changes, and resetTransient preserves whatever was already in
+      // the transient store. Without this seed, if the authoritative
+      // conversation_list_patch carrying agent_working=true hasn't been
+      // delivered yet by the time React commits, the focus effect would
+      // initialize agentWorking from an empty transient (i.e. false) and
+      // the thinking indicator would stay dark until the next patch
+      // arrives — visible flicker on slow first responses.
+      messageStore.setAgentWorking(newConversationId, true);
 
       setCurrentConversationId(newConversationId);
     } catch (err) {
