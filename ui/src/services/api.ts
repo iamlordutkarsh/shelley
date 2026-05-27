@@ -541,6 +541,40 @@ class ApiService {
 
 export const api = new ApiService();
 
+// Feature flags API. Flags are declared in Go (package featureflags); the
+// server returns the merged registry+override list. `override === undefined`
+// means "no override stored"; deleting an override reverts to `default`.
+export interface FeatureFlag {
+  name: string;
+  description: string;
+  default: unknown;
+  override?: unknown;
+}
+
+export const featureFlagsApi = {
+  async list(): Promise<FeatureFlag[]> {
+    const r = await fetch("/feature-flags");
+    if (!r.ok) throw new Error(`Failed to load feature flags: ${r.statusText}`);
+    return r.json();
+  },
+  async set(name: string, value: unknown): Promise<void> {
+    const r = await fetch("/feature-flags", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Shelley-Request": "1" },
+      body: JSON.stringify({ name, value }),
+    });
+    if (!r.ok) throw new Error((await r.text()) || r.statusText);
+  },
+  async clear(name: string): Promise<void> {
+    const r = await fetch("/feature-flags", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json", "X-Shelley-Request": "1" },
+      body: JSON.stringify({ name }),
+    });
+    if (!r.ok) throw new Error((await r.text()) || r.statusText);
+  },
+};
+
 // Custom models API
 export interface CustomModel {
   model_id: string;

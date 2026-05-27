@@ -436,6 +436,9 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /exit", http.HandlerFunc(s.handleExit))
 	mux.Handle("GET /settings", http.HandlerFunc(s.handleGetSettings))
 	mux.Handle("POST /settings", http.HandlerFunc(s.handleSetSetting))
+	mux.Handle("GET /feature-flags", http.HandlerFunc(s.handleGetFeatureFlags))
+	mux.Handle("POST /feature-flags", http.HandlerFunc(s.handleSetFeatureFlag))
+	mux.Handle("DELETE /feature-flags", http.HandlerFunc(s.handleDeleteFeatureFlag))
 
 	// IndexedDB cache encryption: hand out a per-browser AES-GCM key
 	// derived from a server master secret + per-browser session cookie.

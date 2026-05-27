@@ -1632,3 +1632,46 @@ func (db *DB) DeleteCacheSession(ctx context.Context, tokenHash string) error {
 		return q.DeleteCacheSession(ctx, tokenHash)
 	})
 }
+
+// ── Feature flag overrides ───────────────────────────────────────────────────
+
+// GetAllFeatureFlagOverrides returns every persisted override as raw JSON text
+// keyed by flag name. Callers are responsible for filtering out names not
+// recognized by the in-code registry.
+func (db *DB) GetAllFeatureFlagOverrides(ctx context.Context) (map[string]string, error) {
+	var rows []generated.GetAllFeatureFlagsRow
+	err := db.pool.Rx(ctx, func(ctx context.Context, rx *Rx) error {
+		q := generated.New(rx.Conn())
+		var err error
+		rows, err = q.GetAllFeatureFlags(ctx)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(rows))
+	for _, r := range rows {
+		out[r.Name] = r.Value
+	}
+	return out, nil
+}
+
+// SetFeatureFlagOverride upserts a JSON-encoded override.
+func (db *DB) SetFeatureFlagOverride(ctx context.Context, name, jsonValue string) error {
+	return db.pool.Tx(ctx, func(ctx context.Context, tx *Tx) error {
+		q := generated.New(tx.Conn())
+		return q.SetFeatureFlag(ctx, generated.SetFeatureFlagParams{
+			Name:  name,
+			Value: jsonValue,
+		})
+	})
+}
+
+// DeleteFeatureFlagOverride removes a stored override, reverting to the
+// code-defined default.
+func (db *DB) DeleteFeatureFlagOverride(ctx context.Context, name string) error {
+	return db.pool.Tx(ctx, func(ctx context.Context, tx *Tx) error {
+		q := generated.New(tx.Conn())
+		return q.DeleteFeatureFlag(ctx, name)
+	})
+}

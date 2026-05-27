@@ -10155,3 +10155,84 @@ kbd {
   font-style: italic;
   color: var(--text-secondary);
 }
+
+/* Feature flags modal */
+.feature-flag-empty {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  padding: 1rem 0;
+}
+.feature-flag-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+.feature-flag-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.feature-flag-row:last-child {
+  border-bottom: none;
+}
+.feature-flag-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.feature-flag-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+.feature-flag-badge {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  background: var(--accent, #4f46e5);
+  color: white;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.feature-flag-desc {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+.feature-flag-bool {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  user-select: none;
+}
+.feature-flag-json {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.85rem;
+  resize: vertical;
+  min-height: 2.5rem;
+}
+.feature-flag-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.feature-flag-meta {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+.feature-flag-meta code {
+  font-size: 0.8rem;
+}
+.feature-flag-clear {
+  margin-left: auto;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.8rem;
+}
+.feature-flag-error {
+  color: #dc2626;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+}

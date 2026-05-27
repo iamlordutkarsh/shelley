@@ -30,6 +30,7 @@ interface CommandPaletteProps {
   onOpenTerminal: () => void;
   onOpenModelsModal: () => void;
   onOpenNotificationsModal: () => void;
+  onOpenFeatureFlagsModal: () => void;
   onNextConversation: () => void;
   onPreviousConversation: () => void;
   onNextUserMessage: () => void;
@@ -86,6 +87,7 @@ function CommandPalette({
   onOpenTerminal,
   onOpenModelsModal,
   onOpenNotificationsModal,
+  onOpenFeatureFlagsModal,
   onNextConversation,
   onPreviousConversation,
   onNextUserMessage,
@@ -424,6 +426,28 @@ function CommandPalette({
         onClose();
       },
       keywords: ["notification", "notify", "alert", "discord", "webhook", "browser", "favicon"],
+    });
+
+    items.push({
+      id: "feature-flags",
+      type: "action",
+      title: "Feature flags",
+      subtitle: "Toggle experimental features",
+      icon: (
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M3 21V5a2 2 0 012-2h11l-2 4 2 4H5v10"
+          />
+        </svg>
+      ),
+      action: () => {
+        onOpenFeatureFlagsModal();
+        onClose();
+      },
+      keywords: ["feature", "flag", "flags", "experiment", "toggle", "override"],
     });
 
     const mdLabels: Record<
@@ -799,6 +823,7 @@ function CommandPalette({
     onOpenTerminal,
     onOpenModelsModal,
     onOpenNotificationsModal,
+    onOpenFeatureFlagsModal,
     onArchiveConversation,
     onNewConversationWithCwd,
     onClose,

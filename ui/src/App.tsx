@@ -7,6 +7,7 @@ import ConversationDrawer from "./components/ConversationDrawer";
 import CommandPalette from "./components/CommandPalette";
 import ModelsModal from "./components/ModelsModal";
 import NotificationsModal from "./components/NotificationsModal";
+import FeatureFlagsModal from "./components/FeatureFlagsModal";
 import { focusMessageInputIfUnfocused } from "./utils/focusMessageInput";
 import { Conversation, ConversationWithState, ConversationListPatchEvent } from "./types";
 import { api } from "./services/api";
@@ -127,6 +128,7 @@ function App() {
   const [terminalTrigger, setTerminalTrigger] = useState(0);
   const [modelsModalOpen, setModelsModalOpen] = useState(false);
   const [notificationsModalOpen, setNotificationsModalOpen] = useState(false);
+  const [featureFlagsModalOpen, setFeatureFlagsModalOpen] = useState(false);
   const [modelsRefreshTrigger, setModelsRefreshTrigger] = useState(0);
   // Bumped whenever the user picks a cwd via a quick action (e.g. command
   // palette). ChatInterface re-reads localStorage when this changes so the
@@ -845,6 +847,10 @@ function App() {
             setNotificationsModalOpen(true);
             setCommandPaletteOpen(false);
           }}
+          onOpenFeatureFlagsModal={() => {
+            setFeatureFlagsModalOpen(true);
+            setCommandPaletteOpen(false);
+          }}
           onNextConversation={navigateToNextConversation}
           onPreviousConversation={navigateToPreviousConversation}
           onNextUserMessage={navigateToNextUserMessage}
@@ -872,6 +878,14 @@ function App() {
           isOpen={notificationsModalOpen}
           onClose={() => {
             setNotificationsModalOpen(false);
+            focusMessageInputIfUnfocused();
+          }}
+        />
+
+        <FeatureFlagsModal
+          isOpen={featureFlagsModalOpen}
+          onClose={() => {
+            setFeatureFlagsModalOpen(false);
             focusMessageInputIfUnfocused();
           }}
         />
