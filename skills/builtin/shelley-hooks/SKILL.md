@@ -82,3 +82,55 @@ stdin JSON:
 ```
 
 Typical uses: play a sound, post a desktop notification, ping a local script.
+
+## `slash/<command>`
+
+Pluggable slash commands. When a user sends a message that starts with
+`/<command>` (where `<command>` matches `[a-zA-Z0-9_][a-zA-Z0-9_-]*`), Shelley
+looks for an executable at `~/.config/shelley/hooks/slash/<command>`. If
+present, it is run synchronously before the message is recorded or sent to
+the LLM. Its stdout replaces the user-message body. Empty stdout leaves the
+original message unchanged. Applies to both new conversations and follow-up
+messages.
+
+No matching executable → the message is treated as a normal user message
+(no special handling).
+
+stdin JSON:
+```json
+{
+  "command": "foo",
+  "args": "the rest of the message after /foo",
+  "raw_message": "/foo the rest of the message after /foo",
+  "conversation_id": "cXXXXXX",
+  "is_new_conversation": false,
+  "cwd": "/home/user/project",
+  "model": "claude-sonnet-4.5",
+  "user_email": "you@example.com",
+  "is_orchestrator": false
+}
+```
+
+The same context is also exposed via environment variables for shell-friendly
+hooks: `SHELLEY_SLASH_COMMAND`, `SHELLEY_SLASH_ARGS`,
+`SHELLEY_CONVERSATION_ID`, `SHELLEY_CWD`, `SHELLEY_MODEL`,
+`SHELLEY_USER_EMAIL`.
+
+stdout: replacement user-message text. Empty stdout keeps the original
+message (useful for hooks that only have side effects). Failure (non-zero
+exit) surfaces as a 400 to the client and the message is not recorded.
+
+Example: a `~/.config/shelley/hooks/slash/files` hook that injects the
+contents of files matched by a glob:
+```sh
+#!/bin/sh
+set -e
+printf 'Here are the files you asked about:\n\n'
+for f in $SHELLEY_SLASH_ARGS; do
+  printf '=== %s ===\n' "$f"
+  cat "$f"
+  printf '\n'
+done
+```
+Then `/files src/main.go src/util.go please summarize` becomes a normal user
+message with file contents inlined.

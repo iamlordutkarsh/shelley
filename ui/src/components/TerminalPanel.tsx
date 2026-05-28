@@ -36,6 +36,11 @@ interface TerminalPanelProps {
   // onAttached fires when the server tells us which persistent session id this
   // terminal landed on. Callers can persist the id to survive reloads.
   onAttached?: (id: string, termId: string) => void;
+  // Context surfaced to spawned sessions via SHELLEY_* env vars. Only used on
+  // initial spawn; reattaches use the env baked in when the session was
+  // created.
+  conversationId?: string | null;
+  model?: string | null;
 }
 
 // Theme colors for xterm.js
@@ -254,6 +259,8 @@ export default function TerminalPanel({
   onAutoFocusConsumed,
   onActiveTerminalExited,
   onAttached,
+  conversationId,
+  model,
 }: TerminalPanelProps) {
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [height, setHeight] = useState(300);
@@ -620,6 +627,8 @@ export default function TerminalPanel({
             onRegister={registerXterm}
             onUnregister={unregisterXterm}
             onAttached={onAttached}
+            conversationId={conversationId ?? null}
+            model={model ?? null}
           />
         ))}
       </div>
@@ -636,6 +645,8 @@ function TerminalInstanceWithRegistry({
   onRegister,
   onUnregister,
   onAttached,
+  conversationId,
+  model,
 }: {
   term: EphemeralTerminal;
   isVisible: boolean;
@@ -644,6 +655,8 @@ function TerminalInstanceWithRegistry({
   onRegister: (id: string, xterm: Terminal) => void;
   onUnregister: (id: string) => void;
   onAttached?: (id: string, termId: string) => void;
+  conversationId?: string | null;
+  model?: string | null;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
@@ -716,6 +729,8 @@ function TerminalInstanceWithRegistry({
     }
     params.set("cmd", term.command);
     params.set("cwd", term.cwd);
+    if (conversationId) params.set("conversation_id", conversationId);
+    if (model) params.set("model", model);
     const wsUrl = `${protocol}//${window.location.host}/api/exec-ws?${params.toString()}`;
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;

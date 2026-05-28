@@ -5,9 +5,12 @@ import (
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
+
+	"shelley.exe.dev/db"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -382,4 +385,85 @@ func TestExecTerminal_ControlCharacters(t *testing.T) {
 		}
 	}
 	t.Errorf("Ctrl-B (\\x02) was not delivered through pty; cat -v output: %q", output.String())
+}
+
+// TestExecTerminal_ShelleyEnvVars confirms the websocket spawner exposes
+// SHELLEY_CONVERSATION_ID, SHELLEY_MODEL, SHELLEY_USER_EMAIL, SHELLEY_CWD, and
+// SHELLEY_TERMINAL_ID to the spawned command. These are how `!` shell
+// commands (and persistent terminals) learn what conversation they belong to.
+func TestExecTerminal_ShelleyEnvVars(t *testing.T) {
+	t.Parallel()
+	h := NewTestHarness(t)
+
+	mux := http.NewServeMux()
+	h.server.RegisterRoutes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cwd := t.TempDir()
+	cmd := `printf 'CID=%s SLUG=%s MODEL=%s EMAIL=%s CWD=%s TID=%s PORT=%s URL=%s\n' "$SHELLEY_CONVERSATION_ID" "$SHELLEY_CONVERSATION_SLUG" "$SHELLEY_MODEL" "$SHELLEY_USER_EMAIL" "$SHELLEY_CWD" "$SHELLEY_TERMINAL_ID" "$SHELLEY_PORT" "$SHELLEY_URL"`
+	// Create a real conversation with a known slug so SHELLEY_CONVERSATION_SLUG
+	// gets populated via the DB lookup in handleExecWS.
+	slug := "demo-slug"
+	conv, err := h.db.CreateConversation(context.Background(), &slug, true, nil, nil, db.ConversationOptions{})
+	if err != nil {
+		t.Fatalf("create conversation: %v", err)
+	}
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") +
+		"/api/exec-ws?cmd=" + url.QueryEscape(cmd) +
+		"&cwd=" + url.QueryEscape(cwd) +
+		"&conversation_id=" + url.QueryEscape(conv.ConversationID) +
+		"&model=predictable"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Force a known listenPort so SHELLEY_PORT/URL are populated even when
+	// running through httptest (which doesn't go through s.Start).
+	h.server.listenPort = 12345
+
+	header := http.Header{}
+	header.Set("X-ExeDev-Email", "alice@example.com")
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: header})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "test done")
+
+	if err := wsjson.Write(ctx, conn, ExecMessage{Type: "init", Cols: 80, Rows: 24}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	var output strings.Builder
+	for {
+		var msg ExecMessage
+		if err := wsjson.Read(ctx, conn, &msg); err != nil {
+			break
+		}
+		if msg.Type == "output" {
+			data, _ := base64.StdEncoding.DecodeString(msg.Data)
+			output.Write(data)
+		}
+		if msg.Type == "exit" {
+			// keep reading until close to drain any output frames
+		}
+	}
+
+	got := output.String()
+	want := []string{
+		"CID=" + conv.ConversationID,
+		"SLUG=demo-slug",
+		"MODEL=predictable",
+		"EMAIL=alice@example.com",
+		"CWD=" + cwd,
+		"TID=t", // terminal ids are prefixed with 't'
+		"PORT=12345",
+		"URL=http://localhost:12345",
+	}
+	for _, w := range want {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q in output: %q", w, got)
+		}
+	}
 }

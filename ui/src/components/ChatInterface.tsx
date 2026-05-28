@@ -3037,6 +3037,8 @@ function ChatInterface({
       {/* Terminal Panel - between messages and status bar */}
       <TerminalPanel
         terminals={ephemeralTerminals}
+        conversationId={conversationId}
+        model={selectedModel}
         onAttached={onTerminalAttached}
         onClose={(id) => {
           if (onTerminalClose) {

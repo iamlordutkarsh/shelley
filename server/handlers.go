@@ -1118,6 +1118,27 @@ func (s *Server) handleChatConversation(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// Slash-command hook: if the message starts with /<name> and a matching
+	// executable exists at ~/.config/shelley/hooks/slash/<name>, run it and
+	// use its stdout as the replacement message text. Empty stdout leaves
+	// the original message unchanged.
+	slashResult := RunSlashCommandHook(SlashCommandHookInput{
+		RawMessage:     req.Message,
+		ConversationID: conversationID,
+		Cwd:            manager.cwd,
+		Model:          modelID,
+		UserEmail:      userEmail,
+		IsOrchestrator: manager.conversationOptions.IsOrchestrator(),
+	})
+	if slashResult.Err != nil {
+		s.logger.Error("slash-command hook failed", "conversationID", conversationID, "error", slashResult.Err)
+		http.Error(w, fmt.Sprintf("slash command failed: %v", slashResult.Err), http.StatusBadRequest)
+		return
+	}
+	if slashResult.Handled && slashResult.Message != "" {
+		req.Message = slashResult.Message
+	}
+
 	// Decide whether this message will be queued or accepted immediately.
 	// The chat-message hook is told which path it will take so it can react
 	// accordingly.
@@ -1339,6 +1360,25 @@ func (s *Server) handleNewConversation(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("Failed to get conversation manager", "conversationID", conversationID, "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
+	}
+
+	// Slash-command hook: see handleChatConversation for semantics.
+	slashResult := RunSlashCommandHook(SlashCommandHookInput{
+		RawMessage:        req.Message,
+		ConversationID:    conversationID,
+		IsNewConversation: true,
+		Cwd:               hookResult.Cwd,
+		Model:             modelID,
+		UserEmail:         userEmail,
+		IsOrchestrator:    convOpts.IsOrchestrator(),
+	})
+	if slashResult.Err != nil {
+		s.logger.Error("slash-command hook failed", "conversationID", conversationID, "error", slashResult.Err)
+		http.Error(w, fmt.Sprintf("slash command failed: %v", slashResult.Err), http.StatusBadRequest)
+		return
+	}
+	if slashResult.Handled && slashResult.Message != "" {
+		req.Message = slashResult.Message
 	}
 
 	// Create user message

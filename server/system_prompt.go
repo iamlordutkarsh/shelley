@@ -457,6 +457,110 @@ func RunChatMessageHookIn(hooksDir string, input ChatMessageHookInput) (string, 
 	return hookOut.Message, nil
 }
 
+// validSlashCommandName matches simple slash-command names.
+var validSlashCommandName = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_-]*$`)
+
+// SlashCommandHookInput is the JSON data passed to a slash-command hook on stdin.
+// A slash command is any user message whose first token (after a leading slash)
+// matches an executable hook at ~/.config/shelley/hooks/slash/<command>.
+type SlashCommandHookInput struct {
+	Command           string `json:"command"`
+	Args              string `json:"args"`
+	RawMessage        string `json:"raw_message"`
+	ConversationID    string `json:"conversation_id"`
+	IsNewConversation bool   `json:"is_new_conversation"`
+	Cwd               string `json:"cwd,omitempty"`
+	Model             string `json:"model,omitempty"`
+	UserEmail         string `json:"user_email,omitempty"`
+	IsOrchestrator    bool   `json:"is_orchestrator,omitempty"`
+}
+
+// SlashCommandHookResult describes the effect of a slash-command hook.
+type SlashCommandHookResult struct {
+	// Handled is true iff a matching hook was found and executed successfully.
+	// If false, callers should treat the message as a normal user message.
+	Handled bool
+	// Message, if non-empty, replaces the original user message. If empty
+	// while Handled is true, the message has been fully handled by the hook
+	// and no agent turn should be triggered.
+	Message string
+	// Err, if non-nil, indicates the hook was found but failed.
+	Err error
+}
+
+// RunSlashCommandHook checks whether input.RawMessage looks like a slash
+// command ("/<name> ...") and, if so, looks up a matching hook at
+// ~/.config/shelley/hooks/slash/<name>. If the hook exists and is executable,
+// it is run with input JSON on stdin; its stdout becomes the replacement
+// user-message text.
+//
+// If the message does not start with a slash, or the first token is not a
+// valid hook name, or no matching hook exists, the result has Handled=false.
+func RunSlashCommandHook(input SlashCommandHookInput) SlashCommandHookResult {
+	msg := input.RawMessage
+	if !strings.HasPrefix(msg, "/") {
+		return SlashCommandHookResult{}
+	}
+	// Strip leading slash and split into command + args on first whitespace.
+	rest := msg[1:]
+	var cmd, args string
+	if i := strings.IndexAny(rest, " \t\n"); i >= 0 {
+		cmd = rest[:i]
+		args = strings.TrimLeft(rest[i:], " \t\n")
+	} else {
+		cmd = rest
+	}
+	if !validSlashCommandName.MatchString(cmd) {
+		return SlashCommandHookResult{}
+	}
+
+	hookPath, err := findHook("slash/" + cmd)
+	if err != nil {
+		slog.Error("slash-command hook: findHook failed", "command", cmd, "error", err)
+		return SlashCommandHookResult{}
+	}
+	if hookPath == "" {
+		return SlashCommandHookResult{}
+	}
+
+	input.Command = cmd
+	input.Args = args
+
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return SlashCommandHookResult{Handled: true, Err: fmt.Errorf("marshal slash hook input: %w", err)}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmdRun := exec.CommandContext(ctx, hookPath)
+	cmdRun.Stdin = bytes.NewReader(inputJSON)
+	var stdout, stderr bytes.Buffer
+	cmdRun.Stdout = &stdout
+	cmdRun.Stderr = &stderr
+	// Surface useful context via environment too, for hooks that prefer env
+	// over parsing JSON. The JSON on stdin remains the source of truth.
+	cmdRun.Env = append(
+		os.Environ(),
+		"SHELLEY_SLASH_COMMAND="+cmd,
+		"SHELLEY_SLASH_ARGS="+args,
+		"SHELLEY_CONVERSATION_ID="+input.ConversationID,
+		"SHELLEY_CWD="+input.Cwd,
+		"SHELLEY_MODEL="+input.Model,
+		"SHELLEY_USER_EMAIL="+input.UserEmail,
+	)
+
+	if err := cmdRun.Run(); err != nil {
+		slog.Error("slash-command hook failed", "hook", hookPath, "error", err, "stderr", stderr.String())
+		return SlashCommandHookResult{Handled: true, Err: fmt.Errorf("slash hook %s failed: %w (stderr: %s)", cmd, err, strings.TrimSpace(stderr.String()))}
+	}
+
+	out := stdout.String()
+	slog.Info("slash-command hook applied", "command", cmd, "hook", hookPath, "argsLen", len(args), "replyLen", len(out))
+	return SlashCommandHookResult{Handled: true, Message: out}
+}
+
 // defaultHooksDir is $HOME/.config/shelley/hooks, or "" if $HOME is
 // not set. Resolved on each call so that, e.g., a test that swaps
 // $HOME locally still sees its change.
@@ -474,15 +578,22 @@ func findHook(name string) (string, error) {
 }
 
 // findHookIn returns the path to the named hook inside dir if it
-// exists and is executable, or "" if not found.
+// exists and is executable, or "" if not found. Name may be a single
+// segment ("foo") or a two-segment path ("slash/foo") for namespaced hooks.
 func findHookIn(dir, name string) (string, error) {
-	if filepath.Base(name) != name {
+	parts := strings.Split(name, "/")
+	if len(parts) < 1 || len(parts) > 2 {
 		return "", fmt.Errorf("invalid hook name: %q", name)
+	}
+	for _, p := range parts {
+		if p == "" || p == "." || p == ".." || strings.ContainsAny(p, `\`) {
+			return "", fmt.Errorf("invalid hook name: %q", name)
+		}
 	}
 	if dir == "" {
 		return "", nil
 	}
-	hookPath := filepath.Join(dir, name)
+	hookPath := filepath.Join(append([]string{dir}, parts...)...)
 	info, err := os.Stat(hookPath)
 	if os.IsNotExist(err) {
 		return "", nil

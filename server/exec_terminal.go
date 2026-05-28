@@ -37,9 +37,13 @@ type ExecMessage struct {
 func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	termID := r.URL.Query().Get("term_id")
-	cmd := r.URL.Query().Get("cmd")
-	cwd := r.URL.Query().Get("cwd")
+	q := r.URL.Query()
+	termID := q.Get("term_id")
+	cmd := q.Get("cmd")
+	cwd := q.Get("cwd")
+	conversationID := q.Get("conversation_id")
+	model := q.Get("model")
+	userEmail := r.Header.Get("X-ExeDev-Email")
 
 	if termID == "" && cmd == "" {
 		http.Error(w, "cmd or term_id parameter required", http.StatusBadRequest)
@@ -73,7 +77,14 @@ func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request) {
 		rows = 24
 	}
 
-	sess, dc, err := s.attachOrSpawn(termID, cmd, cwd, cols, rows)
+	var slug string
+	if conversationID != "" {
+		if conv, err := s.db.GetConversationByID(ctx, conversationID); err == nil && conv.Slug != nil {
+			slug = *conv.Slug
+		}
+	}
+	extraEnv := buildTerminalEnv(conversationID, slug, model, userEmail, cwd, s.listenPort)
+	sess, dc, err := s.attachOrSpawn(termID, cmd, cwd, cols, rows, extraEnv)
 	if err != nil {
 		wsjson.Write(ctx, conn, ExecMessage{Type: "error", Data: err.Error()})
 		conn.Close(websocket.StatusInternalError, "attach failed")
@@ -93,7 +104,37 @@ func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request) {
 	s.bridgeWS(ctx, conn, dc, sess.ID)
 }
 
-func (s *Server) attachOrSpawn(termID, cmd, cwd string, cols, rows uint16) (*TerminalSession, *dtach.Client, error) {
+// buildTerminalEnv returns the SHELLEY_* environment variables to inject into
+// ephemeral / persistent terminals spawned from the UI. Empty values are
+// omitted so hooks can use the usual "is set?" tests.
+func buildTerminalEnv(conversationID, slug, model, userEmail, cwd string, listenPort int) []string {
+	var env []string
+	add := func(k, v string) {
+		if v == "" {
+			return
+		}
+		env = append(env, k+"="+v)
+	}
+	add("SHELLEY_CONVERSATION_ID", conversationID)
+	add("SHELLEY_CONVERSATION_SLUG", slug)
+	add("SHELLEY_MODEL", model)
+	add("SHELLEY_USER_EMAIL", userEmail)
+	add("SHELLEY_CWD", cwd)
+	if cwd != "" {
+		if root, err := getGitRoot(cwd); err == nil && root != "" {
+			add("SHELLEY_GIT_ROOT", root)
+		}
+	}
+	if listenPort > 0 {
+		add("SHELLEY_PORT", fmt.Sprintf("%d", listenPort))
+		// Local URL — scripts running on the VM can reach the shelley API
+		// directly without going through the exe.dev auth proxy.
+		add("SHELLEY_URL", fmt.Sprintf("http://localhost:%d", listenPort))
+	}
+	return env
+}
+
+func (s *Server) attachOrSpawn(termID, cmd, cwd string, cols, rows uint16, extraEnv []string) (*TerminalSession, *dtach.Client, error) {
 	unlock := s.terminals.LockAttach()
 	defer unlock()
 	if termID != "" {
@@ -112,7 +153,7 @@ func (s *Server) attachOrSpawn(termID, cmd, cwd string, cols, rows uint16) (*Ter
 			return nil, nil, fmt.Errorf("unknown terminal id %s", termID)
 		}
 	}
-	return s.terminals.Spawn(cmd, cwd, cols, rows)
+	return s.terminals.Spawn(cmd, cwd, cols, rows, extraEnv)
 }
 
 // bridgeWS shuttles bytes between the browser websocket and the dtach client.

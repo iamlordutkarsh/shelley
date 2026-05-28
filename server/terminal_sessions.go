@@ -37,7 +37,7 @@ type TerminalSession struct {
 // connections. The default spawns an out-of-process `shelley dtach serve`
 // child so sessions outlive the parent shelley. Tests can replace it to run
 // in-process.
-type SpawnerFunc func(socket, logFile, cwd, command string, cols, rows uint16) (pid int, err error)
+type SpawnerFunc func(socket, logFile, cwd, command string, cols, rows uint16, extraEnv []string) (pid int, err error)
 
 // TerminalSessions tracks persistent dtach sessions on disk.
 type TerminalSessions struct {
@@ -145,7 +145,7 @@ func (t *TerminalSessions) Get(id string) *TerminalSession {
 // returns the session record together with the attached client. Doing the
 // attach inline closes the race where a fast-exiting command tears down the
 // socket before any external attach can succeed.
-func (t *TerminalSessions) Spawn(command, cwd string, cols, rows uint16) (*TerminalSession, *dtach.Client, error) {
+func (t *TerminalSessions) Spawn(command, cwd string, cols, rows uint16, extraEnv []string) (*TerminalSession, *dtach.Client, error) {
 	if command == "" {
 		return nil, nil, errors.New("terminals: empty command")
 	}
@@ -163,7 +163,12 @@ func (t *TerminalSessions) Spawn(command, cwd string, cols, rows uint16) (*Termi
 	socket := filepath.Join(t.dir, id+".sock")
 	logFile := filepath.Join(t.dir, id+".log")
 
-	pid, err := t.spawner(socket, logFile, cwd, command, cols, rows)
+	// SHELLEY_TERMINAL_ID identifies this dtach session. It's stable across
+	// reattaches because the id is the on-disk session id.
+	env := append([]string(nil), extraEnv...)
+	env = append(env, "SHELLEY_TERMINAL_ID="+id)
+
+	pid, err := t.spawner(socket, logFile, cwd, command, cols, rows, env)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -265,7 +270,7 @@ func newTerminalID() (string, error) {
 
 // spawnSubprocess starts `shelley dtach new` as an out-of-process child so
 // it survives shelley restarts (Setsid + Release).
-func (t *TerminalSessions) spawnSubprocess(socket, logFile, cwd, command string, cols, rows uint16) (int, error) {
+func (t *TerminalSessions) spawnSubprocess(socket, logFile, cwd, command string, cols, rows uint16, extraEnv []string) (int, error) {
 	logF, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return 0, fmt.Errorf("terminals: open log: %w", err)
@@ -282,6 +287,9 @@ func (t *TerminalSessions) spawnSubprocess(socket, logFile, cwd, command string,
 		"bash", "--login", "-c", command,
 	}
 	cmd := exec.Command(t.exe, args...)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	cmd.Stdin = nil
 	cmd.Stdout = logF
 	cmd.Stderr = logF
@@ -298,8 +306,12 @@ func (t *TerminalSessions) spawnSubprocess(socket, logFile, cwd, command string,
 // InProcessSpawner runs the dtach server in a goroutine inside the current
 // process. Sessions die when this process exits. Intended for tests; blocks
 // until the listener is ready.
-func InProcessSpawner(socket, logFile, cwd, command string, cols, rows uint16) (int, error) {
+func InProcessSpawner(socket, logFile, cwd, command string, cols, rows uint16, extraEnv []string) (int, error) {
 	ready := make(chan struct{})
+	var env []string
+	if len(extraEnv) > 0 {
+		env = append(os.Environ(), extraEnv...)
+	}
 	go func() {
 		_ = dtach.Serve(dtach.ServerOptions{
 			SocketPath: socket,
@@ -308,6 +320,7 @@ func InProcessSpawner(socket, logFile, cwd, command string, cols, rows uint16) (
 			Dir:        cwd,
 			Cols:       cols,
 			Rows:       rows,
+			Env:        env,
 			Ready:      ready,
 		})
 	}()
