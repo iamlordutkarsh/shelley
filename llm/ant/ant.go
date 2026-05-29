@@ -129,7 +129,7 @@ type Service struct {
 	APIKey          string            // must be non-empty
 	Model           string            // defaults to DefaultModel if empty
 	MaxTokens       int               // 0 means use model-specific limit from modelMaxOutputTokens
-	ThinkingLevel   llm.ThinkingLevel // thinking level (ThinkingLevelOff disables, default is ThinkingLevelMedium)
+	ThinkingLevel   llm.ThinkingLevel // service-level default; ThinkingLevelDefault (zero) means "none configured"
 	Backoff         []time.Duration   // retry backoff durations; defaults to {15s, 30s, 60s} if nil
 	SupportsImages_ bool              // whether this service accepts image inputs
 }
@@ -574,22 +574,7 @@ func (s *Service) fromLLMRequest(r *llm.Request) *request {
 		System:     mapped(r.System, fromLLMSystem),
 	}
 
-	// Enable extended thinking if a thinking level is set
-	if s.ThinkingLevel != llm.ThinkingLevelOff {
-		if useAdaptiveThinking(model) {
-			// Opus 4.7+: adaptive thinking with effort level
-			req.Thinking = &thinking{Type: "adaptive"}
-			req.OutputConfig = &outputConfig{Effort: s.ThinkingLevel.ThinkingEffort()}
-		} else {
-			// Legacy: manual thinking with budget_tokens
-			budget := s.ThinkingLevel.ThinkingBudgetTokens()
-			// Ensure max_tokens > budget_tokens as required by Anthropic API
-			if maxTokens <= budget {
-				req.MaxTokens = budget + 1024
-			}
-			req.Thinking = &thinking{Type: "enabled", BudgetTokens: budget}
-		}
-	}
+	applyAnthropicThinking(req, model, llm.EffectiveThinkingLevel(s.ThinkingLevel, r.ThinkingLevel), maxTokens)
 
 	// Cap max_tokens at the model's maximum allowed output tokens
 	if limit := s.maxOutputTokens(); req.MaxTokens > limit {
@@ -600,6 +585,29 @@ func (s *Service) fromLLMRequest(r *llm.Request) *request {
 		}
 	}
 	return req
+}
+
+// applyAnthropicThinking sets the Thinking / OutputConfig fields and may bump
+// MaxTokens for budget-style models so max_tokens > budget_tokens (an API
+// requirement).
+func applyAnthropicThinking(req *request, model string, level llm.ThinkingLevel, maxTokens int) {
+	if level == llm.ThinkingLevelOff || level == llm.ThinkingLevelDefault {
+		return
+	}
+	if useAdaptiveThinking(model) {
+		// Only Claude Opus 4.7+ uses adaptive thinking and supports "xhigh".
+		req.Thinking = &thinking{Type: "adaptive"}
+		req.OutputConfig = &outputConfig{Effort: level.ThinkingEffort()}
+		return
+	}
+	budget := level.ThinkingBudgetTokens()
+	if budget == 0 {
+		return
+	}
+	if maxTokens <= budget {
+		req.MaxTokens = budget + 1024
+	}
+	req.Thinking = &thinking{Type: "enabled", BudgetTokens: budget}
 }
 
 // fromLLMRequestStrippingAllThinking is like fromLLMRequest but strips thinking
@@ -628,18 +636,7 @@ func (s *Service) fromLLMRequestStrippingAllThinking(r *llm.Request) *request {
 		System:     mapped(r.System, fromLLMSystem),
 	}
 
-	if s.ThinkingLevel != llm.ThinkingLevelOff {
-		if useAdaptiveThinking(model) {
-			req.Thinking = &thinking{Type: "adaptive"}
-			req.OutputConfig = &outputConfig{Effort: s.ThinkingLevel.ThinkingEffort()}
-		} else {
-			budget := s.ThinkingLevel.ThinkingBudgetTokens()
-			if maxTokens <= budget {
-				req.MaxTokens = budget + 1024
-			}
-			req.Thinking = &thinking{Type: "enabled", BudgetTokens: budget}
-		}
-	}
+	applyAnthropicThinking(req, model, llm.EffectiveThinkingLevel(s.ThinkingLevel, r.ThinkingLevel), maxTokens)
 
 	if limit := s.maxOutputTokens(); req.MaxTokens > limit {
 		req.MaxTokens = limit

@@ -1341,3 +1341,54 @@ func TestBuildGeminiRequestImageInToolResult(t *testing.T) {
 		t.Errorf("part 1 inlineData = %+v", parts[1].InlineData)
 	}
 }
+
+// TestThinkingConfigRequestOverride exercises per-request ThinkingLevel
+// overrides on Gemini.
+func TestThinkingConfigRequestOverride(t *testing.T) {
+	tests := []struct {
+		name        string
+		svc         *Service
+		reqLevel    llm.ThinkingLevel
+		wantLevel   string
+		wantBudget  *int
+		wantOmitted bool
+	}{
+		{name: "req high beats svc medium on 3-flash", svc: &Service{Model: "gemini-3-flash-preview", APIKey: "x", ThinkingLevel: llm.ThinkingLevelMedium}, reqLevel: llm.ThinkingLevelHigh, wantLevel: "high"},
+		{name: "req xhigh on 3-flash clamps to high", svc: &Service{Model: "gemini-3-flash-preview", APIKey: "x"}, reqLevel: llm.ThinkingLevelXHigh, wantLevel: "high"},
+		{name: "req high on 3-pro", svc: &Service{Model: "gemini-3-pro-preview", APIKey: "x"}, reqLevel: llm.ThinkingLevelHigh, wantLevel: "high"},
+		{name: "req medium clamps to high on 3-pro", svc: &Service{Model: "gemini-3-pro-preview", APIKey: "x"}, reqLevel: llm.ThinkingLevelMedium, wantLevel: "high"},
+		{name: "req off on 3-flash uses low", svc: &Service{Model: "gemini-3-flash-preview", APIKey: "x", ThinkingLevel: llm.ThinkingLevelMedium}, reqLevel: llm.ThinkingLevelOff, wantLevel: "low"},
+		{name: "req beats verbatim", svc: &Service{Model: "gemini-3-flash-preview", APIKey: "x", ReasoningEffort: "medium"}, reqLevel: llm.ThinkingLevelHigh, wantLevel: "high"},
+		{name: "req low on 2.5", svc: &Service{Model: "gemini-2.5-pro", APIKey: "x"}, reqLevel: llm.ThinkingLevelLow, wantBudget: ptr(2048)},
+		{name: "req off on 2.5 zero budget", svc: &Service{Model: "gemini-2.5-pro", APIKey: "x", ThinkingLevel: llm.ThinkingLevelMedium}, reqLevel: llm.ThinkingLevelOff, wantBudget: ptr(0)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gemReq, err := tt.svc.buildGeminiRequest(&llm.Request{
+				Messages:      []llm.Message{{Role: llm.MessageRoleUser, Content: []llm.Content{{Type: llm.ContentTypeText, Text: "hi"}}}},
+				ThinkingLevel: tt.reqLevel,
+			})
+			if err != nil {
+				t.Fatalf("buildGeminiRequest: %v", err)
+			}
+			if tt.wantOmitted {
+				if gemReq.GenerationConfig != nil && gemReq.GenerationConfig.ThinkingConfig != nil {
+					t.Fatalf("expected no thinkingConfig, got %+v", gemReq.GenerationConfig.ThinkingConfig)
+				}
+				return
+			}
+			if gemReq.GenerationConfig == nil || gemReq.GenerationConfig.ThinkingConfig == nil {
+				t.Fatalf("expected thinkingConfig to be set")
+			}
+			tc := gemReq.GenerationConfig.ThinkingConfig
+			if tc.ThinkingLevel != tt.wantLevel {
+				t.Errorf("thinkingLevel = %q, want %q", tc.ThinkingLevel, tt.wantLevel)
+			}
+			if tt.wantBudget != nil {
+				if tc.ThinkingBudget == nil || *tc.ThinkingBudget != *tt.wantBudget {
+					t.Errorf("thinkingBudget = %v, want %d", tc.ThinkingBudget, *tt.wantBudget)
+				}
+			}
+		})
+	}
+}

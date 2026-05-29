@@ -678,16 +678,19 @@ function App() {
     conversationType?: "normal" | "orchestrator",
     subagentBackend?: "shelley" | "claude-cli" | "codex-cli",
     toolOverrides?: Record<string, "on" | "off">,
+    thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh",
   ) => {
     try {
       const hasOverrides = toolOverrides && Object.keys(toolOverrides).length > 0;
+      const hasThinking = !!thinkingLevel;
       const convOpts =
-        conversationType === "orchestrator" || hasOverrides
+        conversationType === "orchestrator" || hasOverrides || hasThinking
           ? {
               ...(conversationType === "orchestrator"
                 ? { type: "orchestrator" as const, subagent_backend: subagentBackend || "shelley" }
                 : {}),
               ...(hasOverrides ? { tool_overrides: toolOverrides } : {}),
+              ...(hasThinking ? { thinking_level: thinkingLevel } : {}),
             }
           : undefined;
       const response = await api.sendMessageWithNewConversation({

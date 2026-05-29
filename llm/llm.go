@@ -89,6 +89,10 @@ type Request struct {
 	ToolChoice *ToolChoice
 	Tools      []*Tool
 	System     []SystemContent
+	// ThinkingLevel, when non-zero (i.e. not ThinkingLevelDefault), overrides
+	// the per-service default thinking level for this request. Use
+	// ThinkingLevelOff to explicitly disable reasoning for this turn.
+	ThinkingLevel ThinkingLevel
 	// OnStream is called with each streaming delta as the LLM generates content.
 	// If nil, no streaming callbacks are made. The full response is still returned from Do.
 	OnStream func(StreamDelta) `json:"-"`
@@ -372,16 +376,76 @@ func IsServerSideContentType(ct ContentType) bool {
 }
 
 // ThinkingLevel controls how much thinking/reasoning the model does.
-// ThinkingLevelOff is the zero value and disables thinking.
+// ThinkingLevelDefault is the zero value: providers fall back to their
+// per-service default (usually medium). To explicitly turn thinking off, use
+// ThinkingLevelOff.
 const (
-	ThinkingLevelOff     ThinkingLevel = iota // No thinking (zero value)
-	ThinkingLevelMinimal                      // Minimal thinking (1024 tokens / "minimal")
-	ThinkingLevelLow                          // Low thinking (2048 tokens / "low")
-	ThinkingLevelMedium                       // Medium thinking (8192 tokens / "medium")
-	ThinkingLevelHigh                         // High thinking (16384 tokens / "high")
+	ThinkingLevelDefault ThinkingLevel = iota // Use the service-level default
+	ThinkingLevelOff                          // Explicitly disable thinking
+	ThinkingLevelMinimal                      // Minimal thinking (~1024 tokens / "minimal")
+	ThinkingLevelLow                          // Low thinking (~2048 tokens / "low")
+	ThinkingLevelMedium                       // Medium thinking (~8192 tokens / "medium")
+	ThinkingLevelHigh                         // High thinking (~16384 tokens / "high")
+	ThinkingLevelXHigh                        // Maximum thinking (~32768 tokens / "xhigh")
 )
 
-// ThinkingBudgetTokens returns the recommended budget_tokens for Anthropic's extended thinking.
+// EffectiveThinkingLevel resolves the level to use for a request: a non-default
+// request-level override wins; otherwise the service-level default applies.
+func EffectiveThinkingLevel(serviceDefault, requestOverride ThinkingLevel) ThinkingLevel {
+	if requestOverride != ThinkingLevelDefault {
+		return requestOverride
+	}
+	return serviceDefault
+}
+
+// ParseThinkingLevel parses one of the user-facing level names
+// ("default", "off", "minimal", "low", "medium", "high", "xhigh") into a
+// ThinkingLevel. Empty string and unknown values return ThinkingLevelDefault.
+func ParseThinkingLevel(s string) ThinkingLevel {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "off":
+		return ThinkingLevelOff
+	case "minimal":
+		return ThinkingLevelMinimal
+	case "low":
+		return ThinkingLevelLow
+	case "medium":
+		return ThinkingLevelMedium
+	case "high":
+		return ThinkingLevelHigh
+	case "xhigh":
+		return ThinkingLevelXHigh
+	default:
+		return ThinkingLevelDefault
+	}
+}
+
+// Name returns the lower-case user-facing name for the thinking level
+// ("off", "minimal", "low", "medium", "high", "xhigh"). Returns "" for
+// ThinkingLevelDefault.
+func (t ThinkingLevel) Name() string {
+	switch t {
+	case ThinkingLevelOff:
+		return "off"
+	case ThinkingLevelMinimal:
+		return "minimal"
+	case ThinkingLevelLow:
+		return "low"
+	case ThinkingLevelMedium:
+		return "medium"
+	case ThinkingLevelHigh:
+		return "high"
+	case ThinkingLevelXHigh:
+		return "xhigh"
+	default:
+		return ""
+	}
+}
+
+// ThinkingBudgetTokens returns the recommended budget_tokens for Anthropic's
+// extended thinking (used by older non-adaptive Claude models). Returns 0 for
+// ThinkingLevelOff/Default. ThinkingLevelXHigh is clamped to the high budget
+// since budget-style APIs don't have a separate "xhigh" tier.
 func (t ThinkingLevel) ThinkingBudgetTokens() int {
 	switch t {
 	case ThinkingLevelMinimal:
@@ -390,7 +454,7 @@ func (t ThinkingLevel) ThinkingBudgetTokens() int {
 		return 2048
 	case ThinkingLevelMedium:
 		return 8192
-	case ThinkingLevelHigh:
+	case ThinkingLevelHigh, ThinkingLevelXHigh:
 		return 16384
 	default:
 		return 0
@@ -408,6 +472,8 @@ func (t ThinkingLevel) ThinkingEffort() string {
 		return "medium"
 	case ThinkingLevelHigh:
 		return "high"
+	case ThinkingLevelXHigh:
+		return "xhigh"
 	default:
 		return ""
 	}

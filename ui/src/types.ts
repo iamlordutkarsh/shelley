@@ -77,6 +77,7 @@ export interface ChatRequest {
     subagent_backend?: "shelley" | "claude-cli" | "codex-cli";
     tool_overrides?: Record<string, "on" | "off">;
     disable_all_tools?: boolean;
+    thinking_level?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
   };
   queue?: boolean;
 }

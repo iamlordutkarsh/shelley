@@ -56,6 +56,7 @@ import DirectoryPickerModal from "./DirectoryPickerModal";
 import { useVersionChecker } from "./VersionChecker";
 import TerminalPanel, { EphemeralTerminal } from "./TerminalPanel";
 import ModelPicker from "./ModelPicker";
+import ThinkingLevelPicker, { DEFAULT_THINKING_LEVEL, ThinkingLevel } from "./ThinkingLevelPicker";
 import ModelBar from "./ModelBar";
 import SystemPromptView from "./SystemPromptView";
 import {
@@ -729,6 +730,7 @@ interface ChatInterfaceProps {
     conversationType?: "normal" | "orchestrator",
     subagentBackend?: "shelley" | "claude-cli" | "codex-cli",
     toolOverrides?: Record<string, "on" | "off">,
+    thinkingLevel?: ThinkingLevel,
   ) => Promise<void>;
   onDistillNewGeneration?: (
     sourceConversationId: string,
@@ -907,6 +909,28 @@ function ChatInterface({
       max_context_tokens?: number;
     }>
   >(window.__SHELLEY_INIT__?.models || []);
+  const THINKING_LEVEL_KEY = "shelley.thinkingLevel";
+  const [thinkingLevel, setThinkingLevelState] = useState<ThinkingLevel>(() => {
+    try {
+      const stored = localStorage.getItem(THINKING_LEVEL_KEY);
+      const valid: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+      if (stored !== null && valid.includes(stored as ThinkingLevel)) {
+        return stored as ThinkingLevel;
+      }
+    } catch {
+      /* ignore */
+    }
+    return DEFAULT_THINKING_LEVEL;
+  });
+  const setThinkingLevel = (level: ThinkingLevel) => {
+    setThinkingLevelState(level);
+    try {
+      localStorage.setItem(THINKING_LEVEL_KEY, level);
+    } catch {
+      /* ignore */
+    }
+  };
+
   const [selectedModel, setSelectedModelState] = useState<string>(() => {
     // First check localStorage for a sticky model preference
     const storedModel = localStorage.getItem("shelley_selected_model");
@@ -1718,6 +1742,7 @@ function ChatInterface({
       orchestratorOn ? "orchestrator" : undefined,
       orchestratorOn ? subagentBackend : undefined,
       Object.keys(realOverrides).length > 0 ? realOverrides : undefined,
+      thinkingLevel,
     );
   };
 
@@ -1937,6 +1962,19 @@ function ChatInterface({
     const modelObj = models.find((m) => m.id === selectedModel);
     return modelObj?.display_name || selectedModel;
   })();
+
+  // Pull the conversation's reasoning effort out of conversation_options once
+  // per options-string change, rather than re-parsing on every render.
+  const conversationThinkingLevel = React.useMemo<string | null>(() => {
+    const raw = currentConversation?.conversation_options;
+    if (!raw) return null;
+    try {
+      const opts = JSON.parse(raw);
+      return opts?.thinking_level || null;
+    } catch {
+      return null;
+    }
+  }, [currentConversation?.conversation_options]);
 
   const handleUnarchive = async () => {
     if (!conversationId) return;
@@ -2257,6 +2295,7 @@ function ChatInterface({
           key={`model-bar-${generation}`}
           model={modelsByGeneration.get(generation) || currentConversation?.model}
           models={models}
+          thinkingLevel={conversationThinkingLevel}
         />,
       ];
       const systemMessages = systemMessagesByGeneration.get(generation) || [];
@@ -2457,16 +2496,22 @@ function ChatInterface({
     ) : !conversationId ? (
       // New conversation — show model picker and cwd selector
       <div className="status-bar-new-conversation">
-        <div
-          className="status-field status-field-model"
-          title="AI model to use for this conversation"
-        >
-          <span className="status-field-label">{t("modelLabel")}</span>
+        <div className="status-field status-field-model">
+          <span className="status-field-label" title="AI model to use for this conversation">
+            {t("modelLabel")}
+          </span>
           <ModelPicker
             models={models}
             selectedModel={selectedModel}
             onSelectModel={setSelectedModel}
             onManageModels={() => onOpenModelsModal?.()}
+            disabled={sending}
+          />
+        </div>
+        <div className="status-field status-field-thinking">
+          <ThinkingLevelPicker
+            value={thinkingLevel}
+            onChange={setThinkingLevel}
             disabled={sending}
           />
           <div className="advanced-settings-wrapper" ref={advancedSettingsRef}>

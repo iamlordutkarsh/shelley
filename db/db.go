@@ -256,6 +256,10 @@ type ConversationOptions struct {
 	DisableAllTools bool `json:"disable_all_tools,omitempty"`
 	// EndOfTurnHooks are posted to whenever a top-level agent turn ends.
 	EndOfTurnHooks []ConversationHook `json:"end_of_turn_hooks,omitempty"`
+	// ThinkingLevel is the user-facing reasoning level for this conversation.
+	// One of "off", "minimal", "low", "medium", "high", "xhigh". Empty string
+	// means "use the service default". See llm.ParseThinkingLevel.
+	ThinkingLevel string `json:"thinking_level,omitempty"`
 }
 
 // IsOrchestrator returns true if the conversation is in orchestrator mode.

@@ -95,16 +95,18 @@ func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
 	// Re-run the stringer command to generate them again.
 	var x [1]struct{}
-	_ = x[ThinkingLevelOff-0]
-	_ = x[ThinkingLevelMinimal-1]
-	_ = x[ThinkingLevelLow-2]
-	_ = x[ThinkingLevelMedium-3]
-	_ = x[ThinkingLevelHigh-4]
+	_ = x[ThinkingLevelDefault-0]
+	_ = x[ThinkingLevelOff-1]
+	_ = x[ThinkingLevelMinimal-2]
+	_ = x[ThinkingLevelLow-3]
+	_ = x[ThinkingLevelMedium-4]
+	_ = x[ThinkingLevelHigh-5]
+	_ = x[ThinkingLevelXHigh-6]
 }
 
-const _ThinkingLevel_name = "ThinkingLevelOffThinkingLevelMinimalThinkingLevelLowThinkingLevelMediumThinkingLevelHigh"
+const _ThinkingLevel_name = "ThinkingLevelDefaultThinkingLevelOffThinkingLevelMinimalThinkingLevelLowThinkingLevelMediumThinkingLevelHighThinkingLevelXHigh"
 
-var _ThinkingLevel_index = [...]uint8{0, 16, 36, 52, 71, 88}
+var _ThinkingLevel_index = [...]uint8{0, 20, 36, 56, 72, 91, 108, 126}
 
 func (i ThinkingLevel) String() string {
 	idx := int(i) - 0

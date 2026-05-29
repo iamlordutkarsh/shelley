@@ -1081,6 +1081,7 @@ func TestResponsesServiceReasoningEffort(t *testing.T) {
 		{name: "override beats thinking level", thinkingLevel: llm.ThinkingLevelMedium, reasoningEffort: "xhigh", wantEffort: "xhigh"},
 		{name: "override none disables reasoning", thinkingLevel: llm.ThinkingLevelMedium, reasoningEffort: "none", wantEffort: "none"},
 		{name: "override when thinking off", thinkingLevel: llm.ThinkingLevelOff, reasoningEffort: "high", wantEffort: "high"},
+		{name: "xhigh maps to xhigh", thinkingLevel: llm.ThinkingLevelXHigh, reasoningEffort: "", wantEffort: "xhigh"},
 	}
 
 	for _, tt := range tests {
@@ -1112,6 +1113,74 @@ func TestResponsesServiceReasoningEffort(t *testing.T) {
 			}
 			_, err := svc.Do(context.Background(), &llm.Request{
 				Messages: []llm.Message{{Role: llm.MessageRoleUser, Content: []llm.Content{{Type: llm.ContentTypeText, Text: "hi"}}}},
+			})
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			if tt.wantEffort == "" {
+				if gotReasoning != nil {
+					t.Fatalf("expected no reasoning, got %+v", gotReasoning)
+				}
+				return
+			}
+			if gotReasoning == nil {
+				t.Fatalf("expected reasoning.effort=%q, got nil", tt.wantEffort)
+			}
+			if gotReasoning.Effort != tt.wantEffort {
+				t.Errorf("effort = %q, want %q", gotReasoning.Effort, tt.wantEffort)
+			}
+		})
+	}
+}
+
+// TestResponsesServiceRequestLevelThinking verifies that a non-default
+// Request.ThinkingLevel overrides both the service ThinkingLevel and the
+// service ReasoningEffort verbatim string.
+func TestResponsesServiceRequestLevelThinking(t *testing.T) {
+	tests := []struct {
+		name       string
+		svcLevel   llm.ThinkingLevel
+		svcEffort  string
+		reqLevel   llm.ThinkingLevel
+		wantEffort string
+	}{
+		{name: "req overrides svc default", svcLevel: llm.ThinkingLevelMedium, reqLevel: llm.ThinkingLevelHigh, wantEffort: "high"},
+		{name: "req off beats svc medium", svcLevel: llm.ThinkingLevelMedium, reqLevel: llm.ThinkingLevelOff, wantEffort: ""},
+		{name: "req off beats svc verbatim", svcLevel: llm.ThinkingLevelMedium, svcEffort: "xhigh", reqLevel: llm.ThinkingLevelOff, wantEffort: ""},
+		{name: "req default falls back to svc verbatim", svcLevel: llm.ThinkingLevelMedium, svcEffort: "xhigh", reqLevel: llm.ThinkingLevelDefault, wantEffort: "xhigh"},
+		{name: "req xhigh beats svc verbatim", svcLevel: llm.ThinkingLevelMedium, svcEffort: "verbatim", reqLevel: llm.ThinkingLevelXHigh, wantEffort: "xhigh"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotReasoning *responsesReasoning
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req responsesRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					t.Fatalf("decode req: %v", err)
+				}
+				gotReasoning = req.Reasoning
+				resp := responsesResponse{
+					ID:     "r",
+					Status: "completed",
+					Output: []responsesOutputItem{{Type: "message", Role: "assistant", Content: []responsesContent{{Type: "output_text", Text: "ok"}}}},
+					Usage:  responsesUsage{InputTokens: 1, OutputTokens: 1},
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(resp)
+			}))
+			defer server.Close()
+
+			svc := &ResponsesService{
+				APIKey:          "k",
+				Model:           GPT41,
+				ModelURL:        server.URL,
+				ThinkingLevel:   tt.svcLevel,
+				ReasoningEffort: tt.svcEffort,
+			}
+			_, err := svc.Do(context.Background(), &llm.Request{
+				Messages:      []llm.Message{{Role: llm.MessageRoleUser, Content: []llm.Content{{Type: llm.ContentTypeText, Text: "hi"}}}},
+				ThinkingLevel: tt.reqLevel,
 			})
 			if err != nil {
 				t.Fatalf("Do: %v", err)

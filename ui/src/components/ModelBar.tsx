@@ -4,9 +4,10 @@ import { Model } from "../types";
 interface ModelBarProps {
   model?: string | null;
   models?: Model[];
+  thinkingLevel?: string | null;
 }
 
-function ModelBar({ model, models = [] }: ModelBarProps) {
+function ModelBar({ model, models = [], thinkingLevel }: ModelBarProps) {
   if (!model) {
     return null;
   }
@@ -21,6 +22,14 @@ function ModelBar({ model, models = [] }: ModelBarProps) {
         <span className="model-bar-icon">🤖</span>
         <span className="model-bar-label">Model</span>
         <span className="model-bar-name">{displayName}</span>
+        {thinkingLevel && (
+          <>
+            <span className="model-bar-label" title="Reasoning effort">
+              Reasoning
+            </span>
+            <span className="model-bar-name">{thinkingLevel}</span>
+          </>
+        )}
       </div>
     </div>
   );

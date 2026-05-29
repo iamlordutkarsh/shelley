@@ -2696,3 +2696,56 @@ func TestWebSearchContentSurvivesJSONRoundTrip(t *testing.T) {
 		t.Errorf("Content[2].Citations = %s, want citations JSON", c2.Citations)
 	}
 }
+
+// TestFromLLMRequestThinkingLevels exercises the per-request ThinkingLevel
+// override across both adaptive and budget-style Claude models.
+func TestFromLLMRequestThinkingLevels(t *testing.T) {
+	tests := []struct {
+		name            string
+		model           string
+		svcLevel        llm.ThinkingLevel
+		reqLevel        llm.ThinkingLevel
+		wantType        string // "", "adaptive" or "enabled"
+		wantEffort      string
+		wantBudgetGreat int // wantBudgetGreat: BudgetTokens must equal this when set
+	}{
+		{name: "adaptive default medium", model: Claude47Opus, svcLevel: llm.ThinkingLevelMedium, wantType: "adaptive", wantEffort: "medium"},
+		{name: "adaptive req xhigh", model: Claude47Opus, svcLevel: llm.ThinkingLevelMedium, reqLevel: llm.ThinkingLevelXHigh, wantType: "adaptive", wantEffort: "xhigh"},
+		{name: "adaptive opus48 xhigh", model: Claude48Opus, svcLevel: llm.ThinkingLevelMedium, reqLevel: llm.ThinkingLevelXHigh, wantType: "adaptive", wantEffort: "xhigh"},
+		{name: "adaptive req off", model: Claude47Opus, svcLevel: llm.ThinkingLevelMedium, reqLevel: llm.ThinkingLevelOff, wantType: ""},
+		{name: "budget default medium", model: Claude45Sonnet, svcLevel: llm.ThinkingLevelMedium, wantType: "enabled", wantBudgetGreat: 8192},
+		{name: "budget req low", model: Claude45Sonnet, svcLevel: llm.ThinkingLevelMedium, reqLevel: llm.ThinkingLevelLow, wantType: "enabled", wantBudgetGreat: 2048},
+		{name: "budget req off", model: Claude45Sonnet, svcLevel: llm.ThinkingLevelMedium, reqLevel: llm.ThinkingLevelOff, wantType: ""},
+		{name: "budget req xhigh maps to high budget", model: Claude45Sonnet, svcLevel: llm.ThinkingLevelOff, reqLevel: llm.ThinkingLevelXHigh, wantType: "enabled", wantBudgetGreat: 16384},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Service{Model: tt.model, ThinkingLevel: tt.svcLevel, APIKey: "x"}
+			got := s.fromLLMRequest(&llm.Request{
+				Messages:      []llm.Message{{Role: llm.MessageRoleUser, Content: []llm.Content{{Type: llm.ContentTypeText, Text: "hi"}}}},
+				ThinkingLevel: tt.reqLevel,
+			})
+			if tt.wantType == "" {
+				if got.Thinking != nil {
+					t.Fatalf("expected no thinking, got %+v", got.Thinking)
+				}
+				return
+			}
+			if got.Thinking == nil {
+				t.Fatalf("expected thinking block, got nil")
+			}
+			if got.Thinking.Type != tt.wantType {
+				t.Errorf("thinking.type = %q, want %q", got.Thinking.Type, tt.wantType)
+			}
+			if tt.wantType == "adaptive" {
+				if got.OutputConfig == nil || got.OutputConfig.Effort != tt.wantEffort {
+					t.Errorf("output_config.effort = %+v, want %q", got.OutputConfig, tt.wantEffort)
+				}
+			} else {
+				if got.Thinking.BudgetTokens != tt.wantBudgetGreat {
+					t.Errorf("thinking.budget_tokens = %d, want %d", got.Thinking.BudgetTokens, tt.wantBudgetGreat)
+				}
+			}
+		})
+	}
+}

@@ -28,7 +28,7 @@ type Service struct {
 	URL           string            // Gemini API URL, uses the gemini package default if empty
 	APIKey        string            // must be non-empty
 	Model         string            // defaults to DefaultModel if empty
-	ThinkingLevel llm.ThinkingLevel // thinking level (ThinkingLevelOff disables thinkingConfig)
+	ThinkingLevel llm.ThinkingLevel // service-level default; zero (ThinkingLevelDefault) leaves thinkingConfig at the model default
 
 	// ReasoningEffort, if non-empty, is used as the thinkingConfig.thinkingLevel
 	// value sent to Gemini 3.x verbatim, overriding ThinkingLevel. Ignored for
@@ -348,7 +348,7 @@ func (s *Service) buildGeminiRequest(req *llm.Request) (*gemini.Request, error) 
 		}
 	}
 
-	if tc := s.thinkingConfig(); tc != nil {
+	if tc := s.thinkingConfig(req); tc != nil {
 		if gemReq.GenerationConfig == nil {
 			gemReq.GenerationConfig = &gemini.GenerationConfig{}
 		}
@@ -358,34 +358,65 @@ func (s *Service) buildGeminiRequest(req *llm.Request) (*gemini.Request, error) 
 	return gemReq, nil
 }
 
-// thinkingConfig builds the Gemini ThinkingConfig from the service settings.
+// thinkingConfig builds the Gemini ThinkingConfig from the service settings
+// and request-level overrides.
+//
+// Precedence:
+//  1. req.ThinkingLevel (request-level override)
+//  2. s.ReasoningEffort (verbatim per-model config; Gemini 3.x only)
+//  3. s.ThinkingLevel (service-level default)
+//
 // Returns nil when no thinking config should be sent (use the model default).
-func (s *Service) thinkingConfig() *gemini.ThinkingConfig {
-	if s.ReasoningEffort == "" && s.ThinkingLevel == llm.ThinkingLevelOff {
+func (s *Service) thinkingConfig(req *llm.Request) *gemini.ThinkingConfig {
+	var reqLevel llm.ThinkingLevel
+	if req != nil {
+		reqLevel = req.ThinkingLevel
+	}
+	level := llm.EffectiveThinkingLevel(s.ThinkingLevel, reqLevel)
+	if level == llm.ThinkingLevelDefault && s.ReasoningEffort == "" {
 		return nil
 	}
+
 	model := cmp.Or(s.Model, DefaultModel)
 	if strings.HasPrefix(model, "gemini-3") {
-		level := s.ReasoningEffort
-		if level == "" {
-			level = s.ThinkingLevel.ThinkingEffort()
+		var effort string
+		switch {
+		case reqLevel == llm.ThinkingLevelOff:
+			// Gemini doesn't really have an "off" for 3.x; smallest is "low".
+			effort = "low"
+		case reqLevel != llm.ThinkingLevelDefault:
+			effort = reqLevel.ThinkingEffort()
+		case s.ReasoningEffort != "":
+			effort = s.ReasoningEffort
+		default:
+			effort = level.ThinkingEffort()
 		}
-		if level == "" {
+		if effort == "" {
 			return nil
 		}
-		// gemini-3-pro-preview accepts only "low" and "high".
+		// Gemini 3.x only accepts low/medium/high (plus, on some snapshots,
+		// minimal). xhigh always errors with HTTP 400; clamp to high.
+		if effort == "xhigh" {
+			effort = "high"
+		}
+		// gemini-3-pro-preview accepts only "low" and "high"; collapse minimal/medium.
 		if model == "gemini-3-pro-preview" {
-			switch level {
+			switch effort {
 			case "minimal", "low":
-				level = "low"
+				effort = "low"
 			case "medium", "high":
-				level = "high"
+				effort = "high"
 			}
 		}
-		return &gemini.ThinkingConfig{ThinkingLevel: level}
+		return &gemini.ThinkingConfig{ThinkingLevel: effort}
 	}
-	// Gemini 2.5 (and earlier) uses an integer thinkingBudget.
-	budget := s.ThinkingLevel.ThinkingBudgetTokens()
+
+	// Gemini 2.5 (and earlier) uses an integer thinkingBudget. Explicit off
+	// sends a 0 budget; default returns nil.
+	if level == llm.ThinkingLevelDefault {
+		return nil
+	}
+	budget := level.ThinkingBudgetTokens()
 	return &gemini.ThinkingConfig{ThinkingBudget: &budget}
 }
 

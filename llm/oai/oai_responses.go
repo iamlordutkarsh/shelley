@@ -28,7 +28,7 @@ type ResponsesService struct {
 	ModelURL      string            // optional, overrides Model.URL
 	Org           string            // optional - organization ID
 	DumpLLM       bool              // whether to dump request/response text to files for debugging; defaults to false
-	ThinkingLevel llm.ThinkingLevel // thinking level (ThinkingLevelOff disables reasoning)
+	ThinkingLevel llm.ThinkingLevel // service-level default; zero (ThinkingLevelDefault) and ThinkingLevelOff both leave the field off the wire
 	ProviderName  string            // e.g., "openai"
 
 	// ReasoningEffort, if non-empty, is used as the reasoning.effort value sent to
@@ -511,15 +511,30 @@ func (s *ResponsesService) Do(ctx context.Context, ir *llm.Request) (*llm.Respon
 		Tools:        tools,
 	}
 
-	// Add reasoning if thinking is enabled. ReasoningEffort, if set, takes
-	// precedence over ThinkingLevel and is passed through verbatim.
-	if s.ReasoningEffort != "" {
-		req.Reasoning = &responsesReasoning{Effort: s.ReasoningEffort}
-	} else if s.ThinkingLevel != llm.ThinkingLevelOff {
-		effort := s.ThinkingLevel.ThinkingEffort()
-		if effort != "" {
-			req.Reasoning = &responsesReasoning{Effort: effort}
-		}
+	// Add reasoning. Precedence:
+	//   1. ir.ThinkingLevel (request-level override from the caller)
+	//   2. s.ReasoningEffort (custom verbatim string from per-model config)
+	//   3. s.ThinkingLevel (service-level default)
+	level := llm.EffectiveThinkingLevel(s.ThinkingLevel, ir.ThinkingLevel)
+	var effort string
+	switch {
+	case ir.ThinkingLevel == llm.ThinkingLevelOff:
+		effort = ""
+	case ir.ThinkingLevel != llm.ThinkingLevelDefault:
+		effort = ir.ThinkingLevel.ThinkingEffort()
+	case s.ReasoningEffort != "":
+		effort = s.ReasoningEffort
+	case level != llm.ThinkingLevelOff:
+		effort = level.ThinkingEffort()
+	}
+	// gpt-5.x-codex rejects `reasoning.effort="minimal"` with HTTP 400;
+	// clamp to "low". Verbatim user-supplied values (s.ReasoningEffort) are
+	// intentionally NOT clamped.
+	if effort == "minimal" && effort != s.ReasoningEffort && strings.Contains(model.ModelName, "codex") {
+		effort = "low"
+	}
+	if effort != "" {
+		req.Reasoning = &responsesReasoning{Effort: effort}
 	}
 
 	// Add tool choice if specified

@@ -3728,6 +3728,11 @@ svg {
   max-width: 300px;
 }
 
+.status-field-thinking {
+  flex: 0 0 auto;
+  min-width: 140px;
+}
+
 .status-field-cwd {
   flex: 1 1 auto;
   min-width: 180px;
@@ -4319,6 +4324,10 @@ svg {
   .status-field-model {
     min-width: 120px;
     max-width: none;
+  }
+
+  .status-field-thinking {
+    min-width: 120px;
   }
 
   .status-field-cwd {

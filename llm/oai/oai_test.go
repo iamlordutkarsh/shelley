@@ -1951,3 +1951,60 @@ func TestServiceDoNonDeepSeekStripsReasoningContent(t *testing.T) {
 		t.Errorf("non-deepseek request should not include reasoning_content; body: %s", gotBody)
 	}
 }
+
+// TestServiceReasoningEffort verifies that Service emits the right
+// reasoning_effort field across precedence (request override beats service
+// verbatim beats service default).
+func TestServiceReasoningEffort(t *testing.T) {
+	tests := []struct {
+		name       string
+		svcLevel   llm.ThinkingLevel
+		svcEffort  string
+		reqLevel   llm.ThinkingLevel
+		wantEffort string // "" means absent
+	}{
+		{name: "all zero", wantEffort: ""},
+		{name: "svc default medium", svcLevel: llm.ThinkingLevelMedium, wantEffort: "medium"},
+		{name: "svc high", svcLevel: llm.ThinkingLevelHigh, wantEffort: "high"},
+		{name: "svc xhigh clamped to high", svcLevel: llm.ThinkingLevelXHigh, wantEffort: "high"},
+		{name: "svc off, svc verbatim wins", svcLevel: llm.ThinkingLevelOff, svcEffort: "verbatim", wantEffort: "verbatim"},
+		{name: "req override beats svc default", svcLevel: llm.ThinkingLevelMedium, reqLevel: llm.ThinkingLevelLow, wantEffort: "low"},
+		{name: "req off wins", svcLevel: llm.ThinkingLevelMedium, svcEffort: "v", reqLevel: llm.ThinkingLevelOff, wantEffort: ""},
+		{name: "req xhigh beats svc verbatim, clamped to high", svcLevel: llm.ThinkingLevelMedium, svcEffort: "v", reqLevel: llm.ThinkingLevelXHigh, wantEffort: "high"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotEffort string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req openai.ChatCompletionRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					t.Fatalf("decode: %v", err)
+				}
+				gotEffort = req.ReasoningEffort
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(openai.ChatCompletionResponse{
+					Choices: []openai.ChatCompletionChoice{{Message: openai.ChatCompletionMessage{Role: "assistant", Content: "ok"}, FinishReason: "stop"}},
+				})
+			}))
+			defer server.Close()
+
+			svc := &Service{
+				APIKey:          "k",
+				Model:           GPT41,
+				ModelURL:        server.URL + "/v1",
+				ThinkingLevel:   tt.svcLevel,
+				ReasoningEffort: tt.svcEffort,
+			}
+			_, err := svc.Do(context.Background(), &llm.Request{
+				Messages:      []llm.Message{{Role: llm.MessageRoleUser, Content: []llm.Content{{Type: llm.ContentTypeText, Text: "hi"}}}},
+				ThinkingLevel: tt.reqLevel,
+			})
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			if gotEffort != tt.wantEffort {
+				t.Errorf("reasoning_effort = %q, want %q", gotEffort, tt.wantEffort)
+			}
+		})
+	}
+}

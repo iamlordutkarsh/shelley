@@ -1277,6 +1277,14 @@ func (s *Server) handleNewConversation(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if convOpts.ThinkingLevel != "" {
+			switch convOpts.ThinkingLevel {
+			case "off", "minimal", "low", "medium", "high", "xhigh":
+			default:
+				http.Error(w, fmt.Sprintf("Invalid thinking_level: %q; must be one of off, minimal, low, medium, high, xhigh", convOpts.ThinkingLevel), http.StatusBadRequest)
+				return
+			}
+		}
 	}
 
 	conversation, err := s.db.CreateConversation(ctx, nil, true, cwdPtr, &modelID, convOpts)

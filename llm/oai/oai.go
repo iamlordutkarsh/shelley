@@ -490,6 +490,17 @@ type Service struct {
 	ProviderName string          // e.g., "openai", "fireworks"
 	Org          string          // optional - organization ID
 	Backoff      []time.Duration // retry backoff durations; defaults to {1s, 2s, 5s, 10s, 15s} if nil
+
+	// ThinkingLevel is the service-level default reasoning level. Most providers
+	// behind the chat-completions API (Fireworks GLM, GPT-OSS, etc.) accept
+	// `reasoning_effort: "low"|"medium"|"high"`; this is sent only when the
+	// effective level is non-zero. Per-request overrides via Request.ThinkingLevel
+	// take precedence.
+	ThinkingLevel llm.ThinkingLevel
+	// ReasoningEffort, when non-empty, is sent as the literal `reasoning_effort`
+	// value (used by custom-model config to pass provider-specific values like
+	// "xhigh" or "none"). Overridden by Request.ThinkingLevel when set.
+	ReasoningEffort string
 }
 
 var _ llm.Service = (*Service)(nil)
@@ -1144,6 +1155,35 @@ func (s *Service) Do(ctx context.Context, ir *llm.Request) (*llm.Response, error
 		Messages:   allMessages,
 		Tools:      tools,
 		ToolChoice: fromLLMToolChoice(ir.ToolChoice), // TODO: make fromLLMToolChoice return an error when a perfect translation is not possible
+	}
+
+	// Reasoning effort. Precedence:
+	//   1. ir.ThinkingLevel (request-level override)
+	//   2. s.ReasoningEffort (verbatim per-model config)
+	//   3. s.ThinkingLevel (service-level default)
+	level := llm.EffectiveThinkingLevel(s.ThinkingLevel, ir.ThinkingLevel)
+	switch {
+	case ir.ThinkingLevel == llm.ThinkingLevelOff:
+		// explicit off: don't emit
+	case ir.ThinkingLevel != llm.ThinkingLevelDefault:
+		req.ReasoningEffort = ir.ThinkingLevel.ThinkingEffort()
+	case s.ReasoningEffort != "":
+		req.ReasoningEffort = s.ReasoningEffort
+	case level != llm.ThinkingLevelOff && level != llm.ThinkingLevelDefault:
+		req.ReasoningEffort = level.ThinkingEffort()
+	}
+	// Many chat-completions backends (Fireworks gpt-oss, GLM, etc.) only
+	// accept low/medium/high for `reasoning_effort` and reject "minimal" and
+	// "xhigh" with HTTP 400. Clamp those down to the closest supported tier.
+	// Verbatim user-configured ReasoningEffort strings are intentionally
+	// preserved (they're an explicit "I know what this provider takes").
+	if req.ReasoningEffort != "" && req.ReasoningEffort != s.ReasoningEffort {
+		switch req.ReasoningEffort {
+		case "minimal":
+			req.ReasoningEffort = "low"
+		case "xhigh":
+			req.ReasoningEffort = "high"
+		}
 	}
 	// Construct the full URL for logging and debugging
 	fullURL := baseURL + "/chat/completions"
