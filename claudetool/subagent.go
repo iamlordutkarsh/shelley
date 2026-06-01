@@ -114,7 +114,7 @@ func (s *SubagentTool) subagentInputSchema() string {
     },
     "wait": {
       "type": "boolean",
-      "description": "Whether to wait for completion (default: true). If false, returns immediately; when the subagent eventually finishes, its response is delivered to you asynchronously as a follow-up tool_result on this same tool call, so you'll see it without polling."
+      "description": "Whether to wait for completion (default: true). If false, returns immediately; when the subagent eventually finishes, its response is delivered asynchronously. If wait=true and the subagent completes before timeout, no later asynchronous duplicate is delivered."
     }%s
   }
 }`, modelProp)

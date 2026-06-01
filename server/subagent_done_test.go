@@ -150,6 +150,13 @@ func (f *subagentDoneFixture) fireOnDone() {
 func TestSubagentDone(t *testing.T) {
 	t.Run("HappyPath_WaitFalse_NotifiesIdleParent", testSubagentDone_HappyPath)
 	t.Run("SuppressedWhileParentBusy", testSubagentDone_SuppressedParentBusy)
+	t.Run("SuppressedAfterWaitResultRecorded", testSubagentDone_SuppressedAfterWaitResultRecorded)
+	t.Run("TimeoutResultStillNotifiesOnCompletion", testSubagentDone_TimeoutResultStillNotifiesOnCompletion)
+	t.Run("TimeoutMarkedBeforeToolResultStillNotifies", testSubagentDone_TimeoutMarkedBeforeToolResultStillNotifies)
+	t.Run("LiteralTimeoutTextDoesNotCountAsTimeout", testSubagentDone_LiteralTimeoutTextDoesNotCountAsTimeout)
+	t.Run("RenamedSlugTimeoutStillNotifies", testSubagentDone_RenamedSlugTimeoutStillNotifies)
+	t.Run("LaterPromptDoesNotClearTimeoutMarker", testSubagentDone_LaterPromptDoesNotClearTimeoutMarker)
+	t.Run("SynchronousCompletionClearsStaleTimeoutMarker", testSubagentDone_SynchronousCompletionClearsStaleTimeoutMarker)
 	t.Run("QueuedDuringDistillation", testSubagentDone_QueuedDuringDistillation)
 	t.Run("WakesIdleParentLoop", testSubagentDone_WakesIdleLoop)
 	t.Run("ToolResultCorrectness", testSubagentDone_ToolResultCorrectness)
@@ -279,17 +286,292 @@ func testSubagentDone_SuppressedParentBusy(t *testing.T) {
 	}
 
 	before := len(f.parentMessages())
-	f.fireOnDone()
-
-	// Allow time for the goroutine to run (and decide not to add anything).
-	time.Sleep(200 * time.Millisecond)
-
+	f.server.notifyParentSubagentDone(f.subagentID)
 	if got := len(f.parentMessages()); got != before {
 		t.Fatalf("expected no new parent messages while a subagent tool call is pending, got %d new", got-before)
 	}
-	if _, _, ok := f.findSyntheticPair(); ok {
+	if hasSyntheticDonePair(t, f.parentMessages()) {
 		t.Fatalf("expected no synthetic pair when parent has a pending subagent tool call")
 	}
+}
+
+func testSubagentDone_SuppressedAfterWaitResultRecorded(t *testing.T) {
+	f := newSubagentDoneFixture(t, "Synchronous wait result.")
+
+	toolUseID := "toolu_wait_done"
+	pendingInput, _ := json.Marshal(map[string]any{"slug": f.subSlug, "prompt": "go", "wait": true})
+	assistantMsg := llm.Message{
+		Role: llm.MessageRoleAssistant,
+		Content: []llm.Content{{
+			Type:      llm.ContentTypeToolUse,
+			ID:        toolUseID,
+			ToolName:  "subagent",
+			ToolInput: pendingInput,
+		}},
+	}
+	if err := f.server.recordMessage(context.Background(), f.parentID, assistantMsg, llm.Usage{}); err != nil {
+		t.Fatalf("record tool_use: %v", err)
+	}
+	toolResultMsg := llm.Message{
+		Role: llm.MessageRoleUser,
+		Content: []llm.Content{{
+			Type:      llm.ContentTypeToolResult,
+			ToolUseID: toolUseID,
+			ToolResult: []llm.Content{{
+				Type: llm.ContentTypeText,
+				Text: "Subagent 'sub-test' response:\nSynchronous wait result.",
+			}},
+		}},
+	}
+	if err := f.server.recordMessage(context.Background(), f.parentID, toolResultMsg, llm.Usage{}); err != nil {
+		t.Fatalf("record tool_result: %v", err)
+	}
+
+	before := len(f.parentMessages())
+	f.server.notifyParentSubagentDone(f.subagentID)
+	if got := len(f.parentMessages()); got != before {
+		t.Fatalf("expected no new parent messages after wait=true already recorded a tool_result, got %d new", got-before)
+	}
+	if hasSyntheticDonePair(t, f.parentMessages()) {
+		t.Fatalf("expected no synthetic subagent-done pair after wait=true already recorded a tool_result")
+	}
+}
+
+func testSubagentDone_TimeoutResultStillNotifiesOnCompletion(t *testing.T) {
+	f := newSubagentDoneFixture(t, "Finished after timeout.")
+
+	toolUseID := "toolu_wait_timeout"
+	input, _ := json.Marshal(map[string]any{"slug": f.subSlug, "prompt": "go", "wait": true})
+	assistantMsg := llm.Message{
+		Role: llm.MessageRoleAssistant,
+		Content: []llm.Content{{
+			Type:      llm.ContentTypeToolUse,
+			ID:        toolUseID,
+			ToolName:  "subagent",
+			ToolInput: input,
+		}},
+	}
+	if err := f.server.recordMessage(context.Background(), f.parentID, assistantMsg, llm.Usage{}); err != nil {
+		t.Fatalf("record tool_use: %v", err)
+	}
+	toolResultMsg := llm.Message{
+		Role: llm.MessageRoleUser,
+		Content: []llm.Content{{
+			Type:      llm.ContentTypeToolResult,
+			ToolUseID: toolUseID,
+			ToolResult: []llm.Content{{
+				Type: llm.ContentTypeText,
+				Text: "Subagent 'sub-test' response:\n[Subagent is still working (timeout reached). Progress summary:]\nStill working.",
+			}},
+		}},
+	}
+	if err := f.server.recordMessage(context.Background(), f.parentID, toolResultMsg, llm.Usage{}); err != nil {
+		t.Fatalf("record tool_result: %v", err)
+	}
+
+	f.server.notifyParentSubagentDone(f.subagentID)
+
+	waitFor(t, 5*time.Second, func() bool {
+		return hasSyntheticDonePair(t, f.parentMessages())
+	})
+}
+
+func testSubagentDone_TimeoutMarkedBeforeToolResultStillNotifies(t *testing.T) {
+	f := newSubagentDoneFixture(t, "Finished after timeout before parent recorded the timeout result.")
+
+	input, _ := json.Marshal(map[string]any{"slug": f.subSlug, "prompt": "go", "wait": true})
+	assistantMsg := llm.Message{
+		Role: llm.MessageRoleAssistant,
+		Content: []llm.Content{{
+			Type:      llm.ContentTypeToolUse,
+			ID:        "toolu_wait_timeout_pending_result",
+			ToolName:  "subagent",
+			ToolInput: input,
+		}},
+	}
+	if err := f.server.recordMessage(context.Background(), f.parentID, assistantMsg, llm.Usage{}); err != nil {
+		t.Fatalf("record tool_use: %v", err)
+	}
+	f.server.markSubagentWaitTimedOut(f.subagentID)
+
+	f.server.notifyParentSubagentDone(f.subagentID)
+
+	waitFor(t, 5*time.Second, func() bool {
+		return hasSyntheticDonePair(t, f.parentMessages())
+	})
+}
+
+func testSubagentDone_LiteralTimeoutTextDoesNotCountAsTimeout(t *testing.T) {
+	f := newSubagentDoneFixture(t, "Already delivered, but mentioned timeout reached literally.")
+
+	toolUseID := "toolu_wait_literal_timeout"
+	input, _ := json.Marshal(map[string]any{"slug": f.subSlug, "prompt": "go", "wait": true})
+	assistantMsg := llm.Message{
+		Role: llm.MessageRoleAssistant,
+		Content: []llm.Content{{
+			Type:      llm.ContentTypeToolUse,
+			ID:        toolUseID,
+			ToolName:  "subagent",
+			ToolInput: input,
+		}},
+	}
+	if err := f.server.recordMessage(context.Background(), f.parentID, assistantMsg, llm.Usage{}); err != nil {
+		t.Fatalf("record tool_use: %v", err)
+	}
+	toolResultMsg := llm.Message{
+		Role: llm.MessageRoleUser,
+		Content: []llm.Content{{
+			Type:      llm.ContentTypeToolResult,
+			ToolUseID: toolUseID,
+			ToolResult: []llm.Content{{
+				Type: llm.ContentTypeText,
+				Text: "Subagent 'sub-test' response:\nThe phrase timeout reached appears in this real answer.",
+			}},
+		}},
+	}
+	if err := f.server.recordMessage(context.Background(), f.parentID, toolResultMsg, llm.Usage{}); err != nil {
+		t.Fatalf("record tool_result: %v", err)
+	}
+
+	before := len(f.parentMessages())
+	f.server.notifyParentSubagentDone(f.subagentID)
+	if got := len(f.parentMessages()); got != before {
+		t.Fatalf("expected no new parent messages for a real wait=true result mentioning timeout text, got %d new", got-before)
+	}
+}
+
+func testSubagentDone_RenamedSlugTimeoutStillNotifies(t *testing.T) {
+	f := newSubagentDoneFixture(t, "Finished after renamed-slug timeout.")
+
+	toolUseID := "toolu_wait_renamed_timeout"
+	input, _ := json.Marshal(map[string]any{"slug": f.subSlug, "prompt": "go", "wait": true})
+	assistantMsg := llm.Message{
+		Role: llm.MessageRoleAssistant,
+		Content: []llm.Content{{
+			Type:      llm.ContentTypeToolUse,
+			ID:        toolUseID,
+			ToolName:  "subagent",
+			ToolInput: input,
+		}},
+	}
+	if err := f.server.recordMessage(context.Background(), f.parentID, assistantMsg, llm.Usage{}); err != nil {
+		t.Fatalf("record tool_use: %v", err)
+	}
+	toolResultMsg := llm.Message{
+		Role: llm.MessageRoleUser,
+		Content: []llm.Content{{
+			Type:      llm.ContentTypeToolResult,
+			ToolUseID: toolUseID,
+			ToolResult: []llm.Content{{
+				Type: llm.ContentTypeText,
+				Text: "Subagent 'sub-test' response: (Note: slug was changed to 'sub-test' for uniqueness. Use 'sub-test' for future messages to this subagent.)\n[Subagent is still working (timeout reached). Progress summary:]\nStill working.",
+			}},
+		}},
+	}
+	if err := f.server.recordMessage(context.Background(), f.parentID, toolResultMsg, llm.Usage{}); err != nil {
+		t.Fatalf("record tool_result: %v", err)
+	}
+
+	f.server.notifyParentSubagentDone(f.subagentID)
+
+	waitFor(t, 5*time.Second, func() bool {
+		return hasSyntheticDonePair(t, f.parentMessages())
+	})
+}
+
+func testSubagentDone_LaterPromptDoesNotClearTimeoutMarker(t *testing.T) {
+	f := newSubagentDoneFixture(t, "Earlier timed-out run finished.")
+
+	f.server.markSubagentWaitTimedOut(f.subagentID)
+	if err := f.server.recordMessage(context.Background(), f.parentID, llm.Message{
+		Role: llm.MessageRoleAssistant,
+		Content: []llm.Content{{
+			Type:      llm.ContentTypeToolUse,
+			ID:        "toolu_later_wait_same_slug",
+			ToolName:  "subagent",
+			ToolInput: []byte(`{"slug":"sub-test","prompt":"new work","wait":true}`),
+		}},
+	}, llm.Usage{}); err != nil {
+		t.Fatalf("record later tool_use: %v", err)
+	}
+
+	f.server.notifyParentSubagentDone(f.subagentID)
+
+	waitFor(t, 5*time.Second, func() bool {
+		return hasSyntheticDonePair(t, f.parentMessages())
+	})
+}
+
+func testSubagentDone_SynchronousCompletionClearsStaleTimeoutMarker(t *testing.T) {
+	f := newSubagentDoneFixture(t, "Synchronous later run already returned.")
+
+	f.server.markSubagentWaitTimedOut(f.subagentID)
+	f.server.clearSubagentWaitTimedOut(f.subagentID)
+	toolUseID := "toolu_sync_after_stale_marker"
+	input, _ := json.Marshal(map[string]any{"slug": f.subSlug, "prompt": "new work", "wait": true})
+	assistantMsg := llm.Message{
+		Role: llm.MessageRoleAssistant,
+		Content: []llm.Content{{
+			Type:      llm.ContentTypeToolUse,
+			ID:        toolUseID,
+			ToolName:  "subagent",
+			ToolInput: input,
+		}},
+	}
+	if err := f.server.recordMessage(context.Background(), f.parentID, assistantMsg, llm.Usage{}); err != nil {
+		t.Fatalf("record tool_use: %v", err)
+	}
+	toolResultMsg := llm.Message{
+		Role: llm.MessageRoleUser,
+		Content: []llm.Content{{
+			Type:      llm.ContentTypeToolResult,
+			ToolUseID: toolUseID,
+			ToolResult: []llm.Content{{
+				Type: llm.ContentTypeText,
+				Text: "Subagent 'sub-test' response:\nSynchronous later run already returned.",
+			}},
+		}},
+	}
+	if err := f.server.recordMessage(context.Background(), f.parentID, toolResultMsg, llm.Usage{}); err != nil {
+		t.Fatalf("record tool_result: %v", err)
+	}
+
+	before := len(f.parentMessages())
+	f.server.notifyParentSubagentDone(f.subagentID)
+	if got := len(f.parentMessages()); got != before {
+		t.Fatalf("expected no new parent messages after stale marker was cleared by synchronous completion, got %d new", got-before)
+	}
+}
+
+func hasSyntheticDonePair(t *testing.T, msgs []generated.Message) bool {
+	t.Helper()
+	for i := 0; i+1 < len(msgs); i++ {
+		if msgs[i].LlmData == nil || msgs[i+1].LlmData == nil {
+			continue
+		}
+		var use, result llm.Message
+		if err := json.Unmarshal([]byte(*msgs[i].LlmData), &use); err != nil {
+			continue
+		}
+		if err := json.Unmarshal([]byte(*msgs[i+1].LlmData), &result); err != nil {
+			continue
+		}
+		var useID string
+		for _, c := range use.Content {
+			if c.Type == llm.ContentTypeToolUse && c.ToolName == "subagent" && strings.HasPrefix(c.ID, "sa_done_") {
+				useID = c.ID
+			}
+		}
+		if useID == "" {
+			continue
+		}
+		for _, c := range result.Content {
+			if c.Type == llm.ContentTypeToolResult && c.ToolUseID == useID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // 3. Parent distilling: notification waits in the pending-batch queue until
@@ -302,10 +584,9 @@ func testSubagentDone_QueuedDuringDistillation(t *testing.T) {
 	f.parentMgr.SetDistilling(true)
 
 	before := len(f.parentMessages())
-	f.fireOnDone()
+	f.server.notifyParentSubagentDone(f.subagentID)
 
 	// While distilling, the synthetic pair must NOT yet be persisted.
-	time.Sleep(100 * time.Millisecond)
 	if got := len(f.parentMessages()); got != before {
 		t.Fatalf("expected no new parent messages while distilling, got %d new", got-before)
 	}

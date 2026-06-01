@@ -102,8 +102,11 @@ func (r *SubagentRunner) RunSubagent(ctx context.Context, conversationID, prompt
 		return "", fmt.Errorf("failed to get LLM service: %w", err)
 	}
 
-	// If the subagent is currently working, stop it first before sending new message
+	// If the subagent is currently working, stop it first before sending new message.
+	// A stopped timed-out run will not later complete, so discard any pending
+	// async-completion marker for it.
 	if manager.IsAgentWorking() {
+		s.clearSubagentWaitTimedOut(conversationID)
 		s.logger.Info("Subagent is working, stopping before sending new message", "conversationID", conversationID)
 		if err := manager.CancelConversation(ctx); err != nil {
 			s.logger.Error("Failed to cancel subagent conversation", "error", err)
@@ -126,7 +129,14 @@ func (r *SubagentRunner) RunSubagent(ctx context.Context, conversationID, prompt
 	if err != nil {
 		return "", fmt.Errorf("failed to accept user message: %w", err)
 	}
-
+	if wait && !manager.IsAgentWorking() {
+		// The response completed synchronously inside AcceptUserMessage; any
+		// stale timeout marker belongs to an earlier run and must not cause a
+		// duplicate async completion for this one. If the new run is still
+		// working, preserve the marker so the earlier timed-out run can still
+		// report completion.
+		s.clearSubagentWaitTimedOut(conversationID)
+	}
 	if !wait {
 		return fmt.Sprintf("Subagent started processing. Conversation ID: %s", conversationID), nil
 	}
@@ -149,7 +159,10 @@ func (r *SubagentRunner) waitForResponse(ctx context.Context, conversationID, mo
 		}
 
 		if time.Now().After(deadline) {
-			// Timeout reached - generate a progress summary
+			// Timeout reached - generate a progress summary. Remember that
+			// this subagent still needs an async completion notification later,
+			// even if it finishes before the parent records the timeout tool_result.
+			s.markSubagentWaitTimedOut(conversationID)
 			return r.generateProgressSummary(ctx, conversationID, modelID, llmService)
 		}
 
@@ -160,7 +173,10 @@ func (r *SubagentRunner) waitForResponse(ctx context.Context, conversationID, mo
 		}
 
 		if !working {
-			// Agent is done, get the last message
+			// Agent is done and this wait=true call will return the final answer
+			// synchronously, so any old timeout marker for this conversation must
+			// not trigger a duplicate async completion later.
+			s.clearSubagentWaitTimedOut(conversationID)
 			return r.getLastAssistantResponse(ctx, conversationID)
 		}
 
@@ -392,10 +408,10 @@ func (r *SubagentRunner) notifySubagentConversation(ctx context.Context, convers
 // same drainPendingMessages path that user messages already use. We just
 // drop a batch onto the queue and trust that machinery.
 //
-// The one case we filter out here is wait=true: if the parent is currently
-// blocked inside a subagent tool call targeting this exact subagent, the
-// tool's own return value will convey the response and our synthetic pair
-// would duplicate it.
+// The case we filter out here is wait=true: if the parent has a pending or
+// already completed synchronous subagent tool call targeting this exact
+// subagent, that tool call conveys the response and our synthetic pair would
+// duplicate it.
 func (s *Server) notifyParentSubagentDone(subagentConversationID string) {
 	ctx := context.Background()
 
@@ -422,12 +438,13 @@ func (s *Server) notifyParentSubagentDone(subagentConversationID string) {
 		return
 	}
 
-	// Suppress notification when the parent is currently inside a
-	// wait=true subagent tool call targeting THIS subagent. In that case
-	// the tool's return value will convey the response; our synthetic pair
-	// would duplicate it. This is the only case we drop: distillation and
-	// busy-with-other-work are now handled by the queue, not suppression.
-	if s.parentHasPendingSubagentToolCall(ctx, parentID, subagentConversationID) {
+	// If a wait=true call timed out, the parent has only seen a progress
+	// summary, so the eventual completion still needs to be delivered. This
+	// in-memory bit closes the race where the subagent finishes before the
+	// parent's timeout tool_result has been persisted.
+	if s.subagentWaitTimedOut(subagentConversationID) {
+		s.clearSubagentWaitTimedOut(subagentConversationID)
+	} else if s.parentHasSynchronousSubagentResult(ctx, parentID, subagentConversationID) {
 		return
 	}
 
@@ -509,16 +526,40 @@ func (s *Server) notifyParentSubagentDone(subagentConversationID string) {
 	s.logger.Info("Queued subagent-done notification for parent", "subagent", slug, "parent", parentID)
 }
 
-// parentHasPendingSubagentToolCall reports whether the parent's most recent
-// assistant message contains a subagent tool_use whose slug matches the
-// just-finished subagent and whose matching tool_result hasn't been
-// recorded yet. That's the wait=true in-flight tool-call case.
+func (s *Server) markSubagentWaitTimedOut(subagentConversationID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.subagentWaitTimeouts[subagentConversationID] = true
+}
+
+func (s *Server) clearSubagentWaitTimedOut(subagentConversationID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.subagentWaitTimeouts, subagentConversationID)
+}
+
+func (s *Server) subagentWaitTimedOut(subagentConversationID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.subagentWaitTimeouts[subagentConversationID]
+}
+
+// parentHasSynchronousSubagentResult reports whether the parent has a
+// wait=true subagent tool call targeting the just-finished subagent that
+// either has not yet received its tool_result or has already received the
+// subagent's final response. In both cases notifyParentSubagentDone must not
+// synthesize another tool_result: the in-flight or recorded tool call is
+// already the delivery path for the result.
+//
+// wait=true calls that timed out are different: their tool_result is only a
+// progress summary, and the eventual completion should still be delivered
+// asynchronously.
 //
 // We match on slug alone (not conversation ID) because the subagent tool
 // enforces slug uniqueness within a parent conversation (see
 // claudetool/subagent.go: "failed to create unique subagent slug"), so a
 // slug uniquely identifies a subagent within its parent.
-func (s *Server) parentHasPendingSubagentToolCall(ctx context.Context, parentID, subagentConversationID string) bool {
+func (s *Server) parentHasSynchronousSubagentResult(ctx context.Context, parentID, subagentConversationID string) bool {
 	var conv generated.Conversation
 	if err := s.db.Queries(ctx, func(q *generated.Queries) error {
 		var err error
@@ -538,9 +579,9 @@ func (s *Server) parentHasPendingSubagentToolCall(ctx context.Context, parentID,
 		return false
 	}
 
-	// Walk backwards to find the most recent message with a subagent tool_use
-	// for this slug; then check whether a subsequent tool_result exists.
-	pendingIDs := map[string]bool{}
+	// Walk backwards to find the most recent subagent tool_use for this slug.
+	// Its wait value tells us whether completion should be synchronous
+	// (wait omitted/true) or asynchronous (wait=false).
 	for i := len(msgs) - 1; i >= 0; i-- {
 		m := msgs[i]
 		if m.LlmData == nil {
@@ -556,32 +597,61 @@ func (s *Server) parentHasPendingSubagentToolCall(ctx context.Context, parentID,
 			}
 			var input struct {
 				Slug string `json:"slug"`
+				Wait *bool  `json:"wait"`
 			}
 			if err := json.Unmarshal(c.ToolInput, &input); err != nil || input.Slug != targetSlug {
 				continue
 			}
-			pendingIDs[c.ID] = true
-		}
-		if len(pendingIDs) > 0 {
-			// Now scan forward from i+1 to see if any of these have results.
-			for j := i + 1; j < len(msgs); j++ {
-				if msgs[j].LlmData == nil {
-					continue
-				}
-				var rm llm.Message
-				if err := json.Unmarshal([]byte(*msgs[j].LlmData), &rm); err != nil {
-					continue
-				}
-				for _, c := range rm.Content {
-					if c.Type == llm.ContentTypeToolResult {
-						delete(pendingIDs, c.ToolUseID)
-					}
-				}
+			if input.Wait != nil && !*input.Wait {
+				return false
 			}
-			return len(pendingIDs) > 0
+			return !subagentToolUseTimedOut(msgs[i+1:], c.ID, targetSlug)
 		}
 	}
 	return false
+}
+
+func subagentToolUseTimedOut(msgs []generated.Message, toolUseID, slug string) bool {
+	for _, m := range msgs {
+		if m.LlmData == nil {
+			continue
+		}
+		var lm llm.Message
+		if err := json.Unmarshal([]byte(*m.LlmData), &lm); err != nil {
+			continue
+		}
+		for _, c := range lm.Content {
+			if c.Type != llm.ContentTypeToolResult || c.ToolUseID != toolUseID {
+				continue
+			}
+			return isSubagentTimeoutResult(toolResultPlainText(c), slug)
+		}
+	}
+	// Still pending: the synchronous tool call will deliver the response.
+	return false
+}
+
+func isSubagentTimeoutResult(text, slug string) bool {
+	prefix := fmt.Sprintf("Subagent '%s' response:", slug)
+	if !strings.HasPrefix(text, prefix) {
+		return false
+	}
+	_, result, ok := strings.Cut(text[len(prefix):], "\n")
+	if !ok {
+		return false
+	}
+	return strings.HasPrefix(result, "[Subagent is still working (timeout reached).") ||
+		strings.Contains(result, ")\n[Subagent is still working (timeout reached).")
+}
+
+func toolResultPlainText(c llm.Content) string {
+	var sb strings.Builder
+	for _, r := range c.ToolResult {
+		if r.Type == llm.ContentTypeText {
+			sb.WriteString(r.Text)
+		}
+	}
+	return sb.String()
 }
 
 // lastAgentText returns the concatenated text content of the most recent

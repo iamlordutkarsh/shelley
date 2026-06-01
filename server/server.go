@@ -268,10 +268,15 @@ type ConversationListUpdate struct {
 
 // Server manages the HTTP API and active conversations
 type Server struct {
-	db                       *db.DB
-	llmManager               LLMProvider
-	toolSetConfig            claudetool.ToolSetConfig
-	activeConversations      map[string]*ConversationManager
+	db                  *db.DB
+	llmManager          LLMProvider
+	toolSetConfig       claudetool.ToolSetConfig
+	activeConversations map[string]*ConversationManager
+	// subagentWaitTimeouts tracks subagent wait=true calls whose synchronous
+	// tool call returned a timeout/progress summary. When those subagents
+	// later finish, they still need an async completion notification even if
+	// the parent's timeout tool_result has not been persisted yet. Guarded by mu.
+	subagentWaitTimeouts     map[string]bool
 	mu                       sync.Mutex
 	logger                   *slog.Logger
 	predictableOnly          bool
@@ -313,18 +318,19 @@ type Server struct {
 // NewServer creates a new server instance
 func NewServer(database *db.DB, llmManager LLMProvider, toolSetConfig claudetool.ToolSetConfig, logger *slog.Logger, predictableOnly bool, defaultModel, requireHeader string) *Server {
 	s := &Server{
-		db:                  database,
-		llmManager:          llmManager,
-		toolSetConfig:       toolSetConfig,
-		activeConversations: make(map[string]*ConversationManager),
-		logger:              logger,
-		predictableOnly:     predictableOnly,
-		defaultModel:        defaultModel,
-		requireHeader:       requireHeader,
-		versionChecker:      NewVersionChecker(),
-		notifDispatcher:     notifications.NewDispatcher(logger),
-		shutdownCh:          make(chan struct{}),
-		hooksDir:            defaultHooksDir(),
+		db:                   database,
+		llmManager:           llmManager,
+		toolSetConfig:        toolSetConfig,
+		activeConversations:  make(map[string]*ConversationManager),
+		subagentWaitTimeouts: make(map[string]bool),
+		logger:               logger,
+		predictableOnly:      predictableOnly,
+		defaultModel:         defaultModel,
+		requireHeader:        requireHeader,
+		versionChecker:       NewVersionChecker(),
+		notifDispatcher:      notifications.NewDispatcher(logger),
+		shutdownCh:           make(chan struct{}),
+		hooksDir:             defaultHooksDir(),
 	}
 
 	s.conversationListStream = newConversationListStream(s)
