@@ -849,21 +849,18 @@ This is a test skill for orchestrators.
 }
 
 func TestNewConversationHookAppliesSlug(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	h := NewTestHarness(t)
 
-	hookDir := filepath.Join(home, ".config", "shelley", "hooks")
-	if err := os.MkdirAll(hookDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	hookPath := filepath.Join(hookDir, "new-conversation")
+	// Install the hook into the harness's isolated hooks dir rather than
+	// $HOME: newTestServer points hooksDir at a private temp dir so tests
+	// never pick up the developer's real ~/.config/shelley/hooks.
+	hookPath := filepath.Join(h.server.hooksDir, "new-conversation")
 	script := `#!/bin/sh
 echo '{"slug": "Hello World!"}'`
 	if err := os.WriteFile(hookPath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	h := NewTestHarness(t)
 	h.NewConversation("first message", "")
 
 	// Read back the conversation; slug should have been applied + sanitized.

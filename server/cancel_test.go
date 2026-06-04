@@ -50,6 +50,10 @@ func newTestServer(t *testing.T) (*Server, *db.DB, *loop.PredictableService) {
 		claudetool.ToolSetConfig{EnableBrowser: false},
 		slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn})),
 		true, "predictable", "")
+	// Isolate tests from any user hooks installed on the dev machine
+	// (e.g. ~/.config/shelley/hooks/new-conversation). An empty temp dir
+	// means findHookIn returns "" and the hooks are inert.
+	svr.hooksDir = t.TempDir()
 	if svr.terminals != nil {
 		svr.terminals.SetSpawner(InProcessSpawner)
 	}
