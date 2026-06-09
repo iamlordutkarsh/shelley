@@ -1,17 +1,15 @@
-// Command lazycue runs self-healing browser tests described in plain English.
+// Command lazycue runs a single self-healing browser test described in plain English.
 //
 // Usage:
 //
-//	lazycue [options] "test description" ["test description" ...]
+//	lazycue [options] "test description"
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -24,12 +22,13 @@ func main() {
 
 func runTests() {
 	baseURL := flag.String("base-url", "", "Base URL of the app under test (required)")
-	testsFile := flag.String("tests-file", "", "Read test descriptions from a JSON file (array of strings); combined with any positional args")
-	cacheDir := flag.String("cache-dir", "", "Directory for cache JSON files (default: .lazycue next to --tests-file, else .lazycue)")
+	cacheDir := flag.String("cache-dir", "", "Directory for cache JSON files (default: .lazycue)")
 	model := flag.String("model", "", "LLM model (default: claude-sonnet-4-6)")
 	apiURL := flag.String("api-url", "", "Anthropic API base URL (env: ANTHROPIC_BASE_URL)")
 	apiKey := flag.String("api-key", "", "Anthropic API key (env: ANTHROPIC_API_KEY)")
 	verbose := flag.Bool("verbose", false, "Verbose output")
+	artifactDir := flag.String("artifact-dir", "", "Directory to write per-step screenshots and an HTML report (index.html)")
+	jsonOut := flag.String("json", "", "Write a machine-readable JSON summary of the run to this file (for CI cache stats)")
 
 	flag.Parse()
 
@@ -38,28 +37,16 @@ func runTests() {
 		os.Exit(2)
 	}
 
-	descriptions := flag.Args()
-	if *testsFile != "" {
-		fromFile, err := readTestsFile(*testsFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: reading tests file: %v\n", err)
-			os.Exit(2)
-		}
-		descriptions = append(descriptions, fromFile...)
-	}
-	if len(descriptions) == 0 {
-		fmt.Fprintln(os.Stderr, `usage: lazycue [options] "test description" ["test description" ...]`)
-		fmt.Fprintln(os.Stderr, "       lazycue --tests-file tests.json [options]")
+	args := flag.Args()
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, `usage: lazycue [options] "test description"`)
 		os.Exit(2)
 	}
+	description := args[0]
 
 	resolvedCacheDir := *cacheDir
 	if resolvedCacheDir == "" {
-		if *testsFile != "" {
-			resolvedCacheDir = filepath.Join(filepath.Dir(*testsFile), ".lazycue")
-		} else {
-			resolvedCacheDir = ".lazycue"
-		}
+		resolvedCacheDir = ".lazycue"
 	}
 
 	opts := lazycue.Options{
@@ -69,60 +56,42 @@ func runTests() {
 		AnthropicBaseURL: *apiURL,
 		AnthropicAPIKey:  *apiKey,
 		Verbose:          *verbose,
+		ArtifactDir:      *artifactDir,
 	}
 
 	ctx := context.Background()
-	var anyFailed bool
-	suiteStart := time.Now()
 
-	for i, desc := range descriptions {
-		if i > 0 {
-			fmt.Println()
-		}
-		result, err := lazycue.Run(ctx, opts, desc)
-		if err != nil {
-			printError(i+1, len(descriptions), desc, err)
-			anyFailed = true
-			continue
-		}
-
-		printResult(i+1, len(descriptions), result)
-
-		if !result.Pass {
-			anyFailed = true
-		}
+	result, err := lazycue.Run(ctx, opts, description)
+	if err != nil {
+		printError(description, err)
+		os.Exit(1)
 	}
 
-	// Suite summary.
-	if len(descriptions) > 1 {
-		fmt.Println()
-		elapsed := time.Since(suiteStart).Round(time.Millisecond)
-		if anyFailed {
-			fmt.Printf("\033[31m✗ some tests failed\033[0m  (%s)\n", elapsed)
+	printResult(result)
+	results := []*lazycue.TestResult{result}
+
+	// Write an HTML report when artifacts are enabled.
+	if *artifactDir != "" {
+		if err := lazycue.WriteReport(*artifactDir, results); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: write report: %v\n", err)
 		} else {
-			fmt.Printf("\033[32m✓ %d tests passed\033[0m  (%s)\n", len(descriptions), elapsed)
+			fmt.Printf("\033[2mreport: %s/index.html\033[0m\n", *artifactDir)
 		}
 	}
 
-	if anyFailed {
+	// Write a machine-readable JSON summary for CI cache-stats reporting.
+	if *jsonOut != "" {
+		if err := lazycue.WriteSummary(*jsonOut, results); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: write json summary: %v\n", err)
+		}
+	}
+
+	if !result.Pass {
 		os.Exit(1)
 	}
 }
 
-// readTestsFile reads a JSON array of test description strings from a file.
-func readTestsFile(path string) ([]string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var descs []string
-	if err := json.Unmarshal(data, &descs); err != nil {
-		return nil, fmt.Errorf("expected a JSON array of strings: %w", err)
-	}
-	return descs, nil
-}
-
-func printResult(idx, total int, r *lazycue.TestResult) {
+func printResult(r *lazycue.TestResult) {
 	// Status emoji + colour.
 	var status, colour, reset string
 	if r.Pass {
@@ -155,11 +124,7 @@ func printResult(idx, total int, r *lazycue.TestResult) {
 	}
 
 	// Header line.
-	if total > 1 {
-		fmt.Printf("%s%s%s  %d/%d  [%s]  %s\n", colour, status, reset, idx, total, badge, timing)
-	} else {
-		fmt.Printf("%s%s%s  [%s]  %s\n", colour, status, reset, badge, timing)
-	}
+	fmt.Printf("%s%s%s  [%s]  %s\n", colour, status, reset, badge, timing)
 
 	// Description (dimmed).
 	fmt.Printf("\033[2m  %s\033[0m\n", truncateDesc(r.Description, 120))
@@ -198,12 +163,8 @@ func printResult(idx, total int, r *lazycue.TestResult) {
 	}
 }
 
-func printError(idx, total int, desc string, err error) {
-	if total > 1 {
-		fmt.Printf("\033[31mERROR\033[0m  %d/%d\n", idx, total)
-	} else {
-		fmt.Printf("\033[31mERROR\033[0m\n")
-	}
+func printError(desc string, err error) {
+	fmt.Printf("\033[31mERROR\033[0m\n")
 	fmt.Printf("\033[2m  %s\033[0m\n", truncateDesc(desc, 120))
 	fmt.Printf("\033[31m  %s\033[0m\n", err)
 }

@@ -70,14 +70,13 @@ and the app shows "Y", that's a genuine failure.
 ### CLI
 
 ```bash
-# Single test
+# The CLI runs exactly one test, passed as a single description string.
 go run github.com/boldsoftware/shelley/lazycue/cmd/lazycue@latest \
   --base-url http://localhost:3000 "Navigate to / and verify the title is My App"
-
-# Multiple tests
-go run github.com/boldsoftware/shelley/lazycue/cmd/lazycue@latest \
-  --base-url http://localhost:3000 "test one" "test two" "test three"
 ```
+
+To run a suite, drive `lazycue.Run` from a Go test (see below) or loop over the
+CLI in a script.
 
 ### CI Workflow
 
@@ -86,12 +85,8 @@ back to the repo (much like auto-formatting), so future runs hit the fast
 path:
 
 ```bash
-LAZY=github.com/boldsoftware/shelley/lazycue/cmd/lazycue@latest
-
-# Run tests; new/updated cache files land in .lazycue/
-go run $LAZY --base-url http://localhost:3000 "test one" "test two"
-
-# If CI passes, commit the cache files so future runs are fast
+# Run tests (e.g. from a Go test suite); new/updated cache files land in
+# .lazycue/. If CI passes, commit the cache files so future runs are fast:
 git add .lazycue && git commit -m "Update LazyCue cache"
 ```
 
@@ -122,13 +117,26 @@ func TestHomepage(t *testing.T) {
 `Test` calls `t.Fatal` on failure and logs each step result via `t.Log`.
 The agent discovers app structure automatically via screenshots and `git grep`.
 
+The `Harness` accumulates every result, so a `TestMain` can emit an aggregate
+HTML report and JSON cache-stats summary after the suite finishes:
+
+```go
+func TestMain(m *testing.M) {
+    code := m.Run()
+    lazycue.WriteReport("/tmp/lazycue-artifacts", app.Results())
+    lazycue.WriteSummary("/tmp/lazycue-summary.json", app.Results())
+    os.Exit(code)
+}
+```
+
 ## Configuration
 
 | Flag / Option | Default | Description |
 |---------------|---------|-------------|
 | `--base-url` | | App URL (**required**) |
-| `--tests-file` | | File listing test descriptions; used to locate the default cache dir |
-| `--cache-dir` | `.lazycue` (next to `--tests-file` if set) | Directory holding cache JSON files |
+| `--cache-dir` | `.lazycue` | Directory holding cache JSON files |
+| `--artifact-dir` | | Write per-step screenshots + an HTML report (`index.html`) here |
+| `--json` | | Write a machine-readable JSON cache-stats summary here |
 | `--model` | `claude-sonnet-4-6` | LLM model |
 | `--api-url` | `ANTHROPIC_BASE_URL` or `https://api.anthropic.com` | Anthropic API base URL |
 | `--api-key` | `ANTHROPIC_API_KEY` | Anthropic API key |

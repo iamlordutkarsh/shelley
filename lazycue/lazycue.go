@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -25,6 +27,7 @@ type Options struct {
 	AnthropicBaseURL string // Anthropic API base URL (default: ANTHROPIC_BASE_URL or https://api.anthropic.com)
 	AnthropicAPIKey  string // Anthropic API key (default: ANTHROPIC_API_KEY)
 	Verbose          bool   // Verbose output
+	ArtifactDir      string // If set, write per-step screenshots here and record their paths on StepResults
 }
 
 func (o *Options) defaults() {
@@ -73,11 +76,12 @@ type TestResult struct {
 
 // StepResult is the result of executing a single DSL step.
 type StepResult struct {
-	Action   string        `json:"action"`
-	Summary  string        `json:"summary"` // e.g. "click #login-button"
-	Pass     bool          `json:"pass"`
-	Error    string        `json:"error,omitempty"`
-	Duration time.Duration `json:"duration"`
+	Action     string        `json:"action"`
+	Summary    string        `json:"summary"` // e.g. "click #login-button"
+	Pass       bool          `json:"pass"`
+	Error      string        `json:"error,omitempty"`
+	Duration   time.Duration `json:"duration"`
+	Screenshot string        `json:"screenshot,omitempty"` // path to PNG captured after this step (if enabled)
 }
 
 // Run executes a single lazy test described by the given plain-English description.
@@ -118,6 +122,19 @@ func Run(ctx context.Context, opts Options, description string) (*TestResult, er
 	}
 	defer browser.Close()
 
+	// Optional artifact collection: per-step screenshots written under a
+	// per-test subdirectory of ArtifactDir.
+	var collector *artifactCollector
+	if opts.ArtifactDir != "" {
+		subdir := filepath.Join(opts.ArtifactDir, DescriptionHash(description))
+		if c, cErr := newArtifactCollector(subdir); cErr == nil {
+			collector = c
+			browser.SetScreenshotSink(c.sink())
+		} else {
+			logf("[lazycue] warning: artifact collector: %v", cErr)
+		}
+	}
+
 	// Step 3: If cached, try executing
 	if cachedTest != nil {
 		steps, parseErr := ParseSteps(cachedTest.Steps)
@@ -133,6 +150,9 @@ func Run(ctx context.Context, opts Options, description string) (*TestResult, er
 			}
 			if allPassed {
 				logf("[lazycue] cached test passed")
+				if collector != nil {
+					collector.attach(results)
+				}
 				return &TestResult{
 					Pass:          true,
 					Steps:         results,
@@ -152,6 +172,9 @@ func Run(ctx context.Context, opts Options, description string) (*TestResult, er
 			browser, err = NewBrowser(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("relaunch browser: %w", err)
+			}
+			if collector != nil {
+				browser.SetScreenshotSink(collector.sink())
 			}
 
 			agentStart := time.Now()
@@ -181,6 +204,9 @@ func Run(ctx context.Context, opts Options, description string) (*TestResult, er
 				}
 			}
 
+			if collector != nil {
+				collector.attach(agentResult.StepResults)
+			}
 			return &TestResult{
 				Pass:           agentResult.Success,
 				Error:          agentResult.Error,
@@ -226,6 +252,9 @@ func Run(ctx context.Context, opts Options, description string) (*TestResult, er
 		}
 	}
 
+	if collector != nil {
+		collector.attach(agentResult.StepResults)
+	}
 	return &TestResult{
 		Pass:           agentResult.Success,
 		Error:          agentResult.Error,
@@ -259,13 +288,30 @@ func summarizeFailure(results []StepResult) string {
 //	func TestLogin(t *testing.T) {
 //	    browser.Test(t, "Navigate to /login and verify the login form is visible")
 //	}
+//
+// A Harness accumulates every TestResult it runs, so a TestMain can emit an
+// aggregate report/summary after all tests finish (see Results).
 type Harness struct {
 	opts Options
+
+	mu      sync.Mutex
+	results []*TestResult
 }
 
 // New creates a Harness with the given options.
 func New(opts Options) *Harness {
 	return &Harness{opts: opts}
+}
+
+// Results returns a copy of every TestResult run through this Harness so far.
+// Use it from TestMain to write an aggregate report/summary, e.g.:
+//
+//	code := m.Run()
+//	lazycue.WriteReport(dir, app.Results())
+func (h *Harness) Results() []*TestResult {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]*TestResult(nil), h.results...)
 }
 
 // Test runs a self-healing browser test described in plain English.
@@ -276,6 +322,9 @@ func (h *Harness) Test(t testing.TB, description string) {
 	if err != nil {
 		t.Fatalf("lazycue: %v", err)
 	}
+	h.mu.Lock()
+	h.results = append(h.results, result)
+	h.mu.Unlock()
 
 	// Log step results.
 	var sb strings.Builder

@@ -16,6 +16,17 @@ type Browser struct {
 	allocCancel context.CancelFunc
 	ctxCancel   context.CancelFunc
 	ctx         context.Context
+
+	// screenshotSink, when non-nil, is invoked after every executed step with
+	// the step index and a PNG screenshot of the page. Used to capture a
+	// visual trace of a test run. Errors capturing screenshots are ignored.
+	screenshotSink func(stepIndex int, action string, png []byte)
+}
+
+// SetScreenshotSink installs a callback invoked after each executed step with
+// a PNG screenshot. Pass nil to disable. Used to produce a visual trace.
+func (b *Browser) SetScreenshotSink(sink func(stepIndex int, action string, png []byte)) {
+	b.screenshotSink = sink
 }
 
 // NewBrowser launches a headless Chrome instance with Pixel 5 viewport (393x851).
@@ -96,6 +107,11 @@ func (b *Browser) ExecuteSteps(ctx context.Context, baseURL string, steps []Step
 		}
 		if err != nil {
 			sr.Error = err.Error()
+		}
+		if b.screenshotSink != nil {
+			if png, sErr := b.Screenshot(ctx); sErr == nil {
+				b.screenshotSink(i, step.Action, png)
+			}
 		}
 		results = append(results, sr)
 		if err != nil {

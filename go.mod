@@ -3,6 +3,7 @@ module shelley.exe.dev
 go 1.26.4
 
 require (
+	github.com/boldsoftware/shelley/lazycue v0.0.0-00010101000000-000000000000
 	github.com/chromedp/cdproto v0.0.0-20260328224638-b7b298a31867
 	github.com/chromedp/chromedp v0.15.1
 	github.com/coder/websocket v1.8.12
@@ -16,6 +17,7 @@ require (
 	github.com/samber/slog-http v1.8.2
 	github.com/sashabaranov/go-openai v1.41.1
 	go.skia.org/infra v0.0.0-20250421160028-59e18403fd4a
+	golang.org/x/crypto v0.48.0
 	golang.org/x/image v0.34.0
 	golang.org/x/sync v0.19.0
 	mvdan.cc/sh/v3 v3.12.0
@@ -66,7 +68,6 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
-	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546 // indirect
 	golang.org/x/mod v0.33.0 // indirect
 	golang.org/x/net v0.50.0 // indirect
@@ -94,6 +95,8 @@ require (
 	golang.org/x/term v0.40.0
 	modernc.org/sqlite v1.48.0
 )
+
+replace github.com/boldsoftware/shelley/lazycue => ./lazycue
 
 tool (
 	github.com/sqlc-dev/sqlc/cmd/sqlc
