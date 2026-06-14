@@ -57,7 +57,6 @@ func TestByID(t *testing.T) {
 		{id: "claude-sonnet-4.5", wantID: "claude-sonnet-4.5"},
 		{id: "claude-haiku-4.5", wantID: "claude-haiku-4.5"},
 		{id: "claude-opus-4.5", wantID: "claude-opus-4.5"},
-		{id: "claude-fable-5", wantID: "claude-fable-5"},
 		{id: "claude-opus-4.8", wantID: "claude-opus-4.8"},
 		{id: "claude-opus-4.7", wantID: "claude-opus-4.7"},
 		{id: "claude-opus-4.6", wantID: "claude-opus-4.6"},
