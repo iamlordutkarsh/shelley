@@ -46,6 +46,13 @@ type APIMessage struct {
 	DisplayData    *string   `json:"display_data,omitempty"`
 	Generation     int64     `json:"generation"`
 	EndOfTurn      *bool     `json:"end_of_turn,omitempty"`
+	// LLMAPIURL and ModelName identify which LLM produced this message's
+	// usage data; ForkedFromMessageID points at the source message a fork
+	// copy came from (nil for originally-incurred messages). Together they
+	// let clients attribute and de-duplicate usage across forks.
+	LLMAPIURL           *string `json:"llm_api_url,omitempty"`
+	ModelName           *string `json:"model_name,omitempty"`
+	ForkedFromMessageID *string `json:"forked_from_message_id,omitempty"`
 }
 
 // ConversationState represents the current state of a conversation.
@@ -155,17 +162,20 @@ func toAPIMessages(messages []generated.Message) []APIMessage {
 		llmData, endOfTurnPtr := llmDataForAPI(msg.LlmData, msg.Type, msg.MessageID)
 
 		apiMsg := APIMessage{
-			MessageID:      msg.MessageID,
-			ConversationID: msg.ConversationID,
-			SequenceID:     msg.SequenceID,
-			Type:           msg.Type,
-			LlmData:        llmData,
-			UserData:       msg.UserData,
-			UsageData:      msg.UsageData,
-			CreatedAt:      msg.CreatedAt,
-			DisplayData:    msg.DisplayData,
-			Generation:     msg.Generation,
-			EndOfTurn:      endOfTurnPtr,
+			MessageID:           msg.MessageID,
+			ConversationID:      msg.ConversationID,
+			SequenceID:          msg.SequenceID,
+			Type:                msg.Type,
+			LlmData:             llmData,
+			UserData:            msg.UserData,
+			UsageData:           msg.UsageData,
+			CreatedAt:           msg.CreatedAt,
+			DisplayData:         msg.DisplayData,
+			Generation:          msg.Generation,
+			EndOfTurn:           endOfTurnPtr,
+			LLMAPIURL:           msg.LlmApiUrl,
+			ModelName:           msg.ModelName,
+			ForkedFromMessageID: msg.ForkedFromMessageID,
 		}
 		apiMessages[i] = apiMsg
 	}

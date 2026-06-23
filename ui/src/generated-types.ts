@@ -28,6 +28,7 @@ export interface Usage {
   output_tokens: number;
   cost_usd: number;
   model?: string;
+  url?: string;
   start_time?: string | null;
   end_time?: string | null;
 }
@@ -44,6 +45,9 @@ export interface ApiMessageForTS {
   display_data?: string | null;
   generation: number;
   end_of_turn?: boolean | null;
+  llm_api_url?: string | null;
+  model_name?: string | null;
+  forked_from_message_id?: string | null;
 }
 
 export interface ConversationStateForTS {

@@ -47,6 +47,7 @@ type Message struct {
 	Generation          int64     `json:"generation"`
 	LlmApiUrl           *string   `json:"llm_api_url"`
 	ModelName           *string   `json:"model_name"`
+	ForkedFromMessageID *string   `json:"forked_from_message_id"`
 }
 
 type Model struct {

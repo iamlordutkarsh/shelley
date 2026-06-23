@@ -86,6 +86,22 @@ func TestForkConversationCopiesUpToCutoff(t *testing.T) {
 	if copied[0].MessageID == msgs[0].MessageID {
 		t.Fatal("copied message should have a new message_id")
 	}
+	// Each copy records the source message it came from so usage data can be
+	// de-duplicated (forked copies carry identical usage values and would
+	// otherwise double-count). Source messages have no provenance.
+	for i, c := range copied {
+		if c.ForkedFromMessageID == nil {
+			t.Fatalf("copied message %d should record forked_from_message_id", i)
+		}
+		if *c.ForkedFromMessageID != msgs[i].MessageID {
+			t.Fatalf("copied message %d forked_from = %q, want %q", i, *c.ForkedFromMessageID, msgs[i].MessageID)
+		}
+	}
+	for i, m := range srcMsgs {
+		if m.ForkedFromMessageID != nil {
+			t.Fatalf("source message %d should have nil forked_from_message_id, got %q", i, *m.ForkedFromMessageID)
+		}
+	}
 }
 
 // TestHandleForkConversationByMessageID drives the HTTP handler and confirms it

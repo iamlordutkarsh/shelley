@@ -90,6 +90,10 @@ type apiMessageForTS struct {
 	DisplayData    *string   `json:"display_data,omitempty"`
 	Generation     int64     `json:"generation"`
 	EndOfTurn      *bool     `json:"end_of_turn,omitempty"`
+
+	LLMAPIURL           *string `json:"llm_api_url,omitempty"`
+	ModelName           *string `json:"model_name,omitempty"`
+	ForkedFromMessageID *string `json:"forked_from_message_id,omitempty"`
 }
 
 type conversationStateForTS struct {

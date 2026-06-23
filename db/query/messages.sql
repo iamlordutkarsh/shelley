@@ -42,8 +42,8 @@ LIMIT ? OFFSET ?;
 -- are renumbered to generation 1 (the destination starts a fresh generation
 -- history), get new message_ids, and preserve content, ordering, and original
 -- timestamps. Used to fork a conversation.
-INSERT INTO messages (message_id, conversation_id, sequence_id, generation, type, llm_data, user_data, usage_data, display_data, excluded_from_context, llm_api_url, model_name, created_at)
-SELECT lower(hex(randomblob(16))), sqlc.arg('dest_conversation_id'), m.sequence_id, 1, m.type, m.llm_data, m.user_data, m.usage_data, m.display_data, m.excluded_from_context, m.llm_api_url, m.model_name, m.created_at
+INSERT INTO messages (message_id, conversation_id, sequence_id, generation, type, llm_data, user_data, usage_data, display_data, excluded_from_context, llm_api_url, model_name, forked_from_message_id, created_at)
+SELECT lower(hex(randomblob(16))), sqlc.arg('dest_conversation_id'), m.sequence_id, 1, m.type, m.llm_data, m.user_data, m.usage_data, m.display_data, m.excluded_from_context, m.llm_api_url, m.model_name, m.message_id, m.created_at
 FROM messages m
 WHERE m.conversation_id = sqlc.arg('source_conversation_id')
   AND m.sequence_id <= sqlc.arg('cutoff_sequence_id')
@@ -120,7 +120,7 @@ UPDATE messages SET excluded_from_context = ? WHERE message_id = ?;
 SELECT m.message_id, m.conversation_id, m.sequence_id, m.type,
        m.llm_data, m.user_data, m.usage_data, m.created_at,
        m.display_data, m.excluded_from_context, m.generation,
-       m.llm_api_url, m.model_name
+       m.llm_api_url, m.model_name, m.forked_from_message_id
 FROM messages m
 WHERE m.conversation_id = ? AND m.type = 'agent'
   AND m.sequence_id > COALESCE(
