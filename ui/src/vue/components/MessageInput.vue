@@ -333,6 +333,19 @@ const props = withDefaults(
      * keystroke via the draft-change emit so the parent can persist it. */
     draftValue?: string;
     initialRows?: number;
+    /** Id of the focused conversation. MessageInput is intentionally NOT keyed
+     * by this in the parent (remounting would break the first-message
+     * conversationId flip), so we watch it here to reset per-conversation
+     * transient state — chiefly pending attachments — that React got for free
+     * via its keyed remount. Without this, a file attached but not sent in one
+     * conversation would be carried into (and sent to) the next. */
+    conversationId?: string | null;
+    /** Id of a lazily-created draft for the *current* input session. When a
+     * new conversation auto-saves a draft, conversationId flips null→draftId
+     * mid-typing; that is the same session, not a switch, so we must NOT clear
+     * attachments. React encodes this exact carve-out in its key:
+     * `(conversationId === lazyDraftId ? null : conversationId) || "new"`. */
+    lazyDraftId?: string | null;
   }>(),
   {
     showQueueOption: false,
@@ -551,6 +564,24 @@ function clearAttachments() {
   });
   attachments.value = [];
 }
+
+// Reset pending attachments when the focused conversation changes. React gets
+// this for free by keying MessageInput on conversationId (the keyed remount
+// throws away component state); Vue keeps a single instance alive across
+// switches, so without this an unsent attachment would leak into — and be sent
+// to — the next conversation.
+//
+// Mirror React's key carve-out for lazy drafts: when a brand-new conversation
+// auto-saves a draft, conversationId flips null→draftId mid-typing. That is the
+// same input session (React keeps the key "new", so no remount), and the user
+// may have already attached a file they're about to send — don't clear it.
+watch(
+  () => props.conversationId,
+  (newId) => {
+    if (newId != null && newId === props.lazyDraftId) return;
+    if (attachments.value.length > 0) clearAttachments();
+  },
+);
 
 function handlePaste(event: ClipboardEvent) {
   const items = event.clipboardData?.items;

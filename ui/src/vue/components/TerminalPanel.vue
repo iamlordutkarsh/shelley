@@ -210,7 +210,9 @@ onMounted(() => {
 onUnmounted(() => observer?.disconnect());
 
 // Auto-select newest tab when a new terminal is added (React effect on
-// [terminals.length]).
+// [terminals.length]). immediate: true so a mount with pre-existing terminals
+// (e.g. after an HMR reload or remount) still selects an active tab; otherwise
+// activeTabId stays null and every terminal renders hidden.
 watch(
   () => props.terminals.length,
   (len) => {
@@ -222,6 +224,7 @@ watch(
       activeTabId.value = null;
     }
   },
+  { immediate: true },
 );
 
 // If active tab got closed, switch to the last remaining (React effect on

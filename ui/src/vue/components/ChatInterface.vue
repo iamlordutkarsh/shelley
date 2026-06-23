@@ -533,6 +533,8 @@
       :injected-text="messageInputInjectedText"
       :draft-value="draftValue"
       :initial-rows="messageInputInitialRows"
+      :conversation-id="conversationId"
+      :lazy-draft-id="lazyDraftId"
       @clear-injected-text="
         diffCommentText = '';
         terminalInjectedText = null;

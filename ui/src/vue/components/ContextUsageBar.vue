@@ -73,7 +73,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 
 const props = defineProps<{
   contextWindowSize: number;
@@ -174,4 +174,11 @@ async function handleStartNewGeneration() {
     distilling.value = false;
   }
 }
+
+// The outside-click listener is added/removed as showPopup toggles, but if the
+// component unmounts while the popup is open the listener would leak (React's
+// useEffect cleanup removes it on unmount). Mirror that here.
+onUnmounted(() => {
+  document.removeEventListener("click", handleClickOutside);
+});
 </script>
