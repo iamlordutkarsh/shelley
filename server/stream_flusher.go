@@ -23,6 +23,13 @@ type streamFlusher struct {
 	running bool
 }
 
+// nextSeq returns the next monotonically increasing sequence number. The
+// counter lives on the ConversationManager so it survives loop resets and is
+// truly per-conversation. Safe to call without holding sf.mu.
+func (sf *streamFlusher) nextSeq() int64 {
+	return sf.cm.streamDeltaSeq.Add(1)
+}
+
 func newStreamFlusher(cm *ConversationManager, interval time.Duration) *streamFlusher {
 	return &streamFlusher{
 		cm:       cm,
@@ -39,7 +46,8 @@ func (sf *streamFlusher) Push(delta llm.StreamDelta) {
 		sf.buf += delta.Text
 		sf.index = delta.Index
 	} else {
-		// For non-text deltas (thinking, etc.), broadcast immediately
+		// For non-text deltas (thinking, etc.), broadcast immediately.
+		delta.Seq = sf.nextSeq()
 		sf.cm.broadcastStream(StreamResponse{
 			StreamDelta: &delta,
 		})
@@ -62,6 +70,14 @@ func (sf *streamFlusher) flush() {
 		sf.timer.Stop()
 		sf.timer = nil
 	}
+	// Assign the seq while still holding sf.mu so its order matches the order
+	// text was accumulated. (nextSeq itself is atomic and doesn't require the
+	// lock; the lock here only orders assignment relative to concurrent
+	// Push calls.)
+	var seq int64
+	if text != "" {
+		seq = sf.nextSeq()
+	}
 	sf.mu.Unlock()
 
 	if text != "" {
@@ -70,6 +86,7 @@ func (sf *streamFlusher) flush() {
 				Type:  "text",
 				Text:  text,
 				Index: idx,
+				Seq:   seq,
 			},
 		})
 	}

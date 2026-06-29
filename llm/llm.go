@@ -84,6 +84,11 @@ type StreamDelta struct {
 	Text string `json:"text"`
 	// Index is the content block index in the response
 	Index int `json:"index"`
+	// Seq is a per-conversation, monotonically increasing sequence number
+	// assigned to each partial update broadcast to clients. It lets clients
+	// detect dropped or out-of-order deltas. It is assigned by the server
+	// when broadcasting (see server.streamFlusher), not by LLM providers.
+	Seq int64 `json:"seq"`
 }
 
 type Request struct {

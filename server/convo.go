@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"shelley.exe.dev/claudetool"
@@ -77,6 +78,15 @@ type ConversationManager struct {
 	// subscribers. Each event is tagged with the manager's ConversationID by
 	// the publish helpers below before fan-out.
 	streamPub *subpub.SubPub[StreamResponse]
+
+	// streamDeltaSeq is a per-conversation, monotonically increasing counter
+	// assigned to each partial stream delta broadcast to clients (see
+	// streamFlusher). It lives on the manager rather than the per-loop
+	// streamFlusher so the sequence keeps increasing across loop resets
+	// (distillation, cancellation, model changes, new generations) within
+	// the same conversation. Clients use it to detect dropped or
+	// out-of-order partial updates.
+	streamDeltaSeq atomic.Int64
 
 	// hydrateMu serializes Hydrate so concurrent callers don't race on the
 	// fields it populates (cwd, modelID, conversationOptions, toolSetConfig,
