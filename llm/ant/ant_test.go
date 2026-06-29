@@ -760,7 +760,7 @@ func TestMaxOutputTokensCapping(t *testing.T) {
 }
 
 // TestMaxOutputTokensMatchModelsDevAPI validates our maxOutputTokens() values against
-// the live models.dev API (same pattern as llmpricing.TestPricingMatchesModelsDev).
+// the live models.dev API (same pattern as llmcatalog.TestPricingMatchesModelsDev).
 func TestMaxOutputTokensMatchModelsDevAPI(t *testing.T) {
 	resp, err := http.Get("https://models.dev/api.json")
 	if err != nil {
