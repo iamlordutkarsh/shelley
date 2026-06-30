@@ -1,3 +1,6 @@
+# Integration-test server binary built by .buildkite/steps/test-shelleykit.sh
+.it/
+
 # Database files
 shelley.db
 shelley.db*
