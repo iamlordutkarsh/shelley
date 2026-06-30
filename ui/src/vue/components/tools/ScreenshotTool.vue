@@ -88,6 +88,7 @@ const props = defineProps<{
   toolResult?: LLMContent[];
   hasError?: boolean;
   executionTime?: string;
+  display?: unknown; // Display data from the tool_result Content
 }>();
 
 // Default to expanded.
@@ -118,7 +119,11 @@ const filename = computed(
 const imageContent = computed(() =>
   props.toolResult && props.toolResult.length >= 2 ? props.toolResult[1] : undefined,
 );
-const imageUrl = computed(() => imageContent.value?.DisplayImageURL);
+// Fall back to the on-disk screenshot served via Display.url. Text-only models
+// (e.g. deepseek-v4-flash, GLM 5.2) get a text-only tool result with no image
+// content, but the screenshot is still saved to disk and surfaced via Display.
+const displayUrl = computed(() => getStringField(props.display, "url"));
+const imageUrl = computed(() => imageContent.value?.DisplayImageURL || displayUrl.value);
 const imageWidth = computed(() => imageContent.value?.DisplayWidth);
 const imageHeight = computed(() => imageContent.value?.DisplayHeight);
 

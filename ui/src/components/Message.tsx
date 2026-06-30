@@ -838,6 +838,7 @@ const Message = React.memo(function Message({
               toolResult={content.ToolResult}
               hasError={hasError}
               executionTime={executionTime}
+              display={content.Display}
             />
           );
         }
@@ -973,6 +974,7 @@ const Message = React.memo(function Message({
               toolResult={content.ToolResult}
               hasError={hasError}
               executionTime={executionTime}
+              display={content.Display}
             />
           );
         }

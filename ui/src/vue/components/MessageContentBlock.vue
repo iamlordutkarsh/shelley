@@ -256,7 +256,13 @@ const toolDispatch = computed<{ is: unknown; props: Record<string, unknown> } | 
       executionTime,
     };
     // Components that also take `display`.
-    if (toolName === "patch" || toolName === "browser" || toolName === "output_iframe") {
+    if (
+      toolName === "patch" ||
+      toolName === "browser" ||
+      toolName === "output_iframe" ||
+      toolName === "screenshot" ||
+      toolName === "browser_take_screenshot"
+    ) {
       base.display = c.Display;
     }
     if (toolName === "patch") {

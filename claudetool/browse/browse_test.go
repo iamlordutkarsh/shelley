@@ -303,9 +303,19 @@ func TestScreenshotRunGatesOnImageSupport(t *testing.T) {
 		if len(out.LLMContent) == 0 || !strings.Contains(out.LLMContent[0].Text, "saved as") {
 			t.Fatalf("expected text result mentioning saved path, got %+v", out.LLMContent)
 		}
-		// The screenshot must still be saved and surfaced for the UI.
+		// The screenshot must still be saved and surfaced for the UI. The UI
+		// renders the on-disk screenshot via Display["url"] (an /api/read URL)
+		// when there's no inline image content, so that field must be present.
 		if out.Display == nil {
 			t.Fatal("expected Display payload even without image content")
+		}
+		display, ok := out.Display.(map[string]any)
+		if !ok {
+			t.Fatalf("expected Display to be a map, got %T", out.Display)
+		}
+		urlStr, _ := display["url"].(string)
+		if !strings.HasPrefix(urlStr, "/api/read?path=") {
+			t.Fatalf("expected Display[\"url\"] to be an /api/read URL, got %q", urlStr)
 		}
 	})
 }

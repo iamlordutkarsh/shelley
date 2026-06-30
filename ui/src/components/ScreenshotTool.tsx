@@ -10,6 +10,7 @@ interface ScreenshotToolProps {
   toolResult?: LLMContent[];
   hasError?: boolean;
   executionTime?: string;
+  display?: unknown; // Display data from the tool_result Content
 }
 
 function ScreenshotTool({
@@ -18,6 +19,7 @@ function ScreenshotTool({
   toolResult,
   hasError,
   executionTime,
+  display,
 }: ScreenshotToolProps) {
   const [isExpanded, setIsExpanded] = useState(true); // Default to expanded
 
@@ -63,7 +65,14 @@ function ScreenshotTool({
   // Construct image URL from the tool result's image content.
   // The server replaces inline base64 data with a URL to /api/message/{id}/image/...
   const imageContent = toolResult && toolResult.length >= 2 ? toolResult[1] : undefined;
-  const imageUrl = imageContent?.DisplayImageURL;
+  // Fall back to the on-disk screenshot served via Display.url. Text-only models
+  // (e.g. deepseek-v4-flash, GLM 5.2) get a text-only tool result with no image
+  // content, but the screenshot is still saved to disk and surfaced via Display.
+  const displayUrl =
+    display && typeof display === "object" && "url" in display && typeof display.url === "string"
+      ? display.url
+      : undefined;
+  const imageUrl = imageContent?.DisplayImageURL || displayUrl;
   const imageWidth = imageContent?.DisplayWidth;
   const imageHeight = imageContent?.DisplayHeight;
 
