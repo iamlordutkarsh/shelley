@@ -56,6 +56,15 @@ type pendingBatch struct {
 	// messages-row ids — no row exists yet). Used to remove the entry from
 	// the array on drain or cancel. Indexed parallel to Messages.
 	MessageIDs []string
+	// SubagentConversationID is set only for Kind=pendingBatchSubagentDone.
+	// It identifies the child subagent whose completion this batch notifies
+	// the parent about. Used to coalesce stale notifications: if a subagent
+	// finishes more than once while the parent is busy (e.g. the parent hit
+	// its wait=true timeout, re-prompted the subagent, and each turn
+	// finished), only the newest queued notification for that subagent
+	// should remain — the earlier ones echo turns that have already been
+	// superseded and would surface as stray duplicate completions.
+	SubagentConversationID string
 }
 
 // ConversationManager manages a single active conversation
@@ -784,11 +793,18 @@ func (cm *ConversationManager) QueueMessage(ctx context.Context, s *Server, mode
 //
 // modelID is used to start the parent's loop if it's currently idle; pass
 // the empty string to fall back to the manager's last-known modelID.
-func (cm *ConversationManager) EnqueueSubagentDone(s *Server, modelID string, assistant, toolResult llm.Message) {
+//
+// subagentConversationID identifies the child subagent this notification is
+// about; enqueueBatch uses it to drop any still-queued (not-yet-drained)
+// notification from an EARLIER turn of the same subagent, so a subagent that
+// finishes repeatedly while the parent is busy never piles up stale
+// completions.
+func (cm *ConversationManager) EnqueueSubagentDone(s *Server, modelID, subagentConversationID string, assistant, toolResult llm.Message) {
 	cm.enqueueBatch(s, pendingBatch{
-		Kind:     pendingBatchSubagentDone,
-		Messages: []llm.Message{assistant, toolResult},
-		ModelID:  modelID,
+		Kind:                   pendingBatchSubagentDone,
+		Messages:               []llm.Message{assistant, toolResult},
+		ModelID:                modelID,
+		SubagentConversationID: subagentConversationID,
 	})
 }
 
@@ -800,6 +816,24 @@ func (cm *ConversationManager) EnqueueSubagentDone(s *Server, modelID string, as
 // batches for the winning drainer to pick up.
 func (cm *ConversationManager) enqueueBatch(s *Server, b pendingBatch) {
 	cm.mu.Lock()
+	// Coalesce stale subagent-done notifications: if this batch notifies the
+	// parent that a subagent finished, drop any still-queued (not-yet-drained)
+	// notification for the SAME subagent from an earlier turn. Those earlier
+	// notifications echo turns the subagent has since superseded (typically
+	// because the parent's wait=true call timed out, re-prompted the subagent,
+	// and each turn produced its own onDone). Draining all of them would
+	// surface as multiple stray "subagent finished" messages to the parent
+	// after it already believed the work was done. Only the newest matters.
+	if b.Kind == pendingBatchSubagentDone && b.SubagentConversationID != "" {
+		kept := cm.pendingBatches[:0]
+		for _, existing := range cm.pendingBatches {
+			if existing.Kind == pendingBatchSubagentDone && existing.SubagentConversationID == b.SubagentConversationID {
+				continue
+			}
+			kept = append(kept, existing)
+		}
+		cm.pendingBatches = kept
+	}
 	cm.pendingBatches = append(cm.pendingBatches, b)
 	cm.lastActivity = time.Now()
 	needsDrain := !cm.agentWorking && !cm.distilling

@@ -599,7 +599,7 @@ func (s *Server) notifyParentSubagentDone(subagentConversationID string) {
 	// distillation and other queued work. We don't need to read or touch
 	// the parent's agentWorking/distilling/loop state ourselves — the queue
 	// is the single point of coordination.
-	parentManager.EnqueueSubagentDone(s, modelID, assistantMsg, toolResultMsg)
+	parentManager.EnqueueSubagentDone(s, modelID, subagentConversationID, assistantMsg, toolResultMsg)
 	s.logger.Info("Queued subagent-done notification for parent", "subagent", slug, "parent", parentID)
 }
 

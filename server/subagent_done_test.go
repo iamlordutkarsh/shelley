@@ -156,6 +156,7 @@ func TestSubagentDone(t *testing.T) {
 	t.Run("CancellationDoesNotNotifyParent", testSubagentDone_CancellationDoesNotNotifyParent)
 	t.Run("QueuedDuringDistillation", testSubagentDone_QueuedDuringDistillation)
 	t.Run("WakesIdleParentLoop", testSubagentDone_WakesIdleLoop)
+	t.Run("StaleNotificationCoalescedWhileParentBusy", testSubagentDone_StaleNotificationCoalesced)
 	t.Run("ToolResultCorrectness", testSubagentDone_ToolResultCorrectness)
 	t.Run("ConcurrentSubagentFinishes_BothPairsAtomic", testSubagentDone_ConcurrentFinishes)
 	t.Run("LastMessageIsToolUse_FallsBackGracefully", testSubagentDone_LastMessageIsToolUse)
@@ -659,6 +660,70 @@ func testSubagentDone_ToolResultCorrectness(t *testing.T) {
 	if !strings.Contains(gotText, "...") {
 		t.Errorf("expected truncation suffix '...' in tool_result text")
 	}
+}
+
+// testSubagentDone_StaleNotificationCoalesced reproduces the "stray duplicate
+// subagent notifications" bug: a subagent that finishes MORE THAN ONCE while
+// the parent is busy (e.g. the parent hit its wait=true timeout, re-prompted
+// the subagent, and the subagent finished each turn) must not leave multiple
+// subagent-done batches queued for the parent. Only ONE notification per
+// subagent conversation should remain pending — the newest — so that when the
+// parent's turn ends it drains a single "subagent finished" pair instead of a
+// pile of stale echoes of already-superseded turns.
+func testSubagentDone_StaleNotificationCoalesced(t *testing.T) {
+	f := newSubagentDoneFixture(t, "first-turn response")
+
+	// Parent is mid-turn: its loop is busy, so enqueued subagent-done batches
+	// wait in pendingBatches rather than draining immediately.
+	f.parentMgr.SetAgentWorking(true)
+
+	// Subagent finishes its first turn while the parent is busy -> one queued
+	// notification.
+	f.server.notifyParentSubagentDone(f.subagentID)
+
+	// The parent re-prompted the subagent (not modeled here) and it finishes a
+	// SECOND turn, still while the parent is busy -> a second notification for
+	// the SAME subagent conversation. This is the stale echo we must coalesce.
+	f.server.notifyParentSubagentDone(f.subagentID)
+
+	// Give the async enqueue goroutines time to land both batches.
+	waitFor(t, 5*time.Second, func() bool {
+		return countPendingSubagentDone(f.parentMgr, f.subagentID) >= 1
+	})
+	time.Sleep(100 * time.Millisecond)
+
+	// Exactly one subagent-done batch for this subagent should be queued: the
+	// second (newest) notification supersedes the first.
+	if n := countPendingSubagentDone(f.parentMgr, f.subagentID); n != 1 {
+		t.Fatalf("expected exactly 1 queued subagent-done batch for the subagent, got %d", n)
+	}
+
+	// Drain: parent finishes its turn. Exactly one synthetic pair should land.
+	f.parentMgr.SetAgentWorking(false)
+	go f.parentMgr.drainPendingMessages(f.server)
+
+	waitFor(t, 5*time.Second, func() bool {
+		return countSyntheticDonePairs(t, f.parentMessages()) >= 1
+	})
+	// Let any erroneous second pair land.
+	time.Sleep(150 * time.Millisecond)
+	if n := countSyntheticDonePairs(t, f.parentMessages()); n != 1 {
+		t.Fatalf("expected exactly one synthetic done pair after draining coalesced notifications, got %d", n)
+	}
+}
+
+// countPendingSubagentDone counts queued subagent-done batches in the parent's
+// pending queue that target the given subagent conversation.
+func countPendingSubagentDone(cm *ConversationManager, subagentID string) int {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	n := 0
+	for _, b := range cm.pendingBatches {
+		if b.Kind == pendingBatchSubagentDone && b.SubagentConversationID == subagentID {
+			n++
+		}
+	}
+	return n
 }
 
 func truncForLog(s string) string {
