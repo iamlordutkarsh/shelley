@@ -36,4 +36,9 @@ export const SLASH_COMMANDS = {
     description: "starts a new conversation",
     takesArgs: true,
   },
+  ARCHIVE: {
+    command: "/archive",
+    description: "archives this conversation",
+    takesArgs: false,
+  },
 } as const satisfies Record<string, SlashCommand>;

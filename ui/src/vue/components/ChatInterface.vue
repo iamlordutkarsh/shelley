@@ -1195,6 +1195,10 @@ async function sendMessage(message: string) {
     showDiffViewer.value = true;
     return;
   }
+  if (trimmedMessage === SLASH_COMMANDS.ARCHIVE.command) {
+    await archiveFromMenu();
+    return;
+  }
   // /compact and its legacy alias /distill both run compaction.
   for (const cmd of [SLASH_COMMANDS.COMPACT.command, SLASH_COMMANDS.DISTILL.command]) {
     if (trimmedMessage === cmd || trimmedMessage.startsWith(`${cmd} `)) {
