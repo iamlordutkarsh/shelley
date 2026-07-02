@@ -590,6 +590,16 @@ func fromLLMMessage(msg llm.Message) message {
 		if c.Type == llm.ContentTypeThinking && c.Signature == "" {
 			continue
 		}
+		// Skip empty text blocks. Anthropic rejects requests whose history
+		// contains a text block with empty text ("text content blocks must be
+		// non-empty"), which permanently wedges the conversation on every
+		// subsequent turn. Such blocks can arise when a streamed response opens
+		// a text content block that never receives any text_delta (e.g. an
+		// empty text block emitted alongside web-search citations). Note a text
+		// block carrying image data (MediaType set) is not "empty".
+		if c.Type == llm.ContentTypeText && c.Text == "" && c.MediaType == "" {
+			continue
+		}
 		contents = append(contents, fromLLMContent(c))
 	}
 	return message{
@@ -1068,6 +1078,22 @@ func parseSSEStream(r io.Reader, onStream func(llm.StreamDelta)) (*response, err
 			contents[i].ToolInput = json.RawMessage("{}")
 		}
 	}
+
+	// Drop empty text blocks. A stream can open a text content block (via
+	// content_block_start) that never receives any text_delta, leaving Text
+	// nil/"". Persisting such a block poisons the conversation history: on the
+	// next turn the whole history is replayed and Anthropic rejects it with
+	// 400 "text content blocks must be non-empty", wedging the conversation.
+	// Filter here so the bad block is never persisted; fromLLMMessage also
+	// filters at send time to heal already-persisted histories.
+	filtered := contents[:0]
+	for _, c := range contents {
+		if c.Type == "text" && (c.Text == nil || *c.Text == "") && len(c.Citations) == 0 {
+			continue
+		}
+		filtered = append(filtered, c)
+	}
+	contents = filtered
 
 	resp.Content = contents
 	return resp, nil

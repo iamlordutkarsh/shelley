@@ -408,6 +408,46 @@ func TestFromLLMMessageSkipsCorruptThinking(t *testing.T) {
 	}
 }
 
+func TestFromLLMMessageSkipsEmptyTextBlocks(t *testing.T) {
+	// An assistant turn that includes an empty text block (e.g. a streamed
+	// text block that never received any text_delta, as happens with some
+	// web-search citation responses) must not serialize that block: Anthropic
+	// rejects "text content blocks must be non-empty", which permanently wedges
+	// the conversation on every subsequent turn.
+	msg := fromLLMMessage(llm.Message{
+		Role: llm.MessageRoleAssistant,
+		Content: []llm.Content{
+			{Type: llm.ContentTypeText, Text: "hello"},
+			{Type: llm.ContentTypeText, Text: ""},
+			{Type: llm.ContentTypeText, Text: "world"},
+		},
+	})
+	if len(msg.Content) != 2 {
+		t.Fatalf("expected empty text block to be skipped, got %d content blocks", len(msg.Content))
+	}
+	if msg.Content[0].Text == nil || *msg.Content[0].Text != "hello" {
+		t.Errorf("content[0] = %v, want \"hello\"", msg.Content[0].Text)
+	}
+	if msg.Content[1].Text == nil || *msg.Content[1].Text != "world" {
+		t.Errorf("content[1] = %v, want \"world\"", msg.Content[1].Text)
+	}
+
+	// A text block carrying image data (MediaType set, empty Text) is NOT
+	// empty and must be preserved.
+	msg = fromLLMMessage(llm.Message{
+		Role: llm.MessageRoleUser,
+		Content: []llm.Content{
+			{Type: llm.ContentTypeText, Text: "", MediaType: "image/png", Data: "abc"},
+		},
+	})
+	if len(msg.Content) != 1 {
+		t.Fatalf("expected image block to be preserved, got %d content blocks", len(msg.Content))
+	}
+	if msg.Content[0].Type != "image" {
+		t.Errorf("content[0].Type = %q, want \"image\"", msg.Content[0].Type)
+	}
+}
+
 func TestFromLLMRequestSkipsEmptyMessages(t *testing.T) {
 	s := &Service{Model: "claude-sonnet-4-6"}
 	req := s.fromLLMRequest(&llm.Request{
@@ -1348,6 +1388,35 @@ func TestParseSSEStreamMultipleDeltas(t *testing.T) {
 	}
 	if *resp.Content[0].Text != "Hello, world!" {
 		t.Errorf("Content[0].Text = %q, want %q", *resp.Content[0].Text, "Hello, world!")
+	}
+}
+
+func TestParseSSEStreamDropsEmptyTextBlock(t *testing.T) {
+	// A stream can open a text block that never receives a text_delta (seen
+	// alongside web-search citation responses). Such an empty text block must
+	// not be persisted — replaying it later makes Anthropic reject the whole
+	// history with 400 "text content blocks must be non-empty".
+	var b strings.Builder
+	b.WriteString("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_empty\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"test\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n")
+	// Block 0: real text.
+	b.WriteString("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+	b.WriteString("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n")
+	b.WriteString("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+	// Block 1: text block that never gets a delta — stays empty.
+	b.WriteString("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+	b.WriteString("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n")
+	b.WriteString("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n")
+	b.WriteString("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+
+	resp, err := parseSSEStream(strings.NewReader(b.String()), nil)
+	if err != nil {
+		t.Fatalf("parseSSEStream() error = %v", err)
+	}
+	if len(resp.Content) != 1 {
+		t.Fatalf("Content length = %d, want 1 (empty text block should be dropped)", len(resp.Content))
+	}
+	if resp.Content[0].Text == nil || *resp.Content[0].Text != "Hello" {
+		t.Errorf("Content[0].Text = %v, want \"Hello\"", resp.Content[0].Text)
 	}
 }
 
