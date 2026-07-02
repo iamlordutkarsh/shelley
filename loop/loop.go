@@ -130,6 +130,15 @@ func (l *Loop) Retry() {
 	}
 }
 
+// SetThinkingLevel updates the reasoning/thinking level sent on subsequent
+// LLM requests. Safe to call concurrently; the new level applies to the next
+// request the loop issues.
+func (l *Loop) SetThinkingLevel(level llm.ThinkingLevel) {
+	l.mu.Lock()
+	l.thinkingLevel = level
+	l.mu.Unlock()
+}
+
 // QueueUserMessage adds a user message to the queue to be processed
 func (l *Loop) QueueUserMessage(message llm.Message) {
 	l.QueueMessages(message)

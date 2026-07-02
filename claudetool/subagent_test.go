@@ -31,13 +31,15 @@ func (m *mockSubagentDB) GetOrCreateSubagentConversation(ctx context.Context, sl
 
 // mockSubagentRunner implements SubagentRunner for testing.
 type mockSubagentRunner struct {
-	response    string
-	err         error
-	lastModelID string // Capture for assertions
+	response      string
+	err           error
+	lastModelID   string // Capture for assertions
+	lastReasoning string // Capture for assertions
 }
 
-func (m *mockSubagentRunner) RunSubagent(ctx context.Context, conversationID, prompt string, wait bool, timeout time.Duration, modelID string) (string, error) {
+func (m *mockSubagentRunner) RunSubagent(ctx context.Context, conversationID, prompt string, wait bool, timeout time.Duration, modelID, reasoning string) (string, error) {
 	m.lastModelID = modelID
+	m.lastReasoning = reasoning
 	if m.err != nil {
 		return "", m.err
 	}
@@ -270,10 +272,76 @@ func TestSubagentTool_NoModels(t *testing.T) {
 	llmTool := tool.Tool()
 	schemaJSON, _ := json.Marshal(llmTool.InputSchema)
 	schemaStr := string(schemaJSON)
-	if strings.Contains(schemaStr, "enum") {
-		t.Errorf("expected no enum in schema when no available models, got %s", schemaStr)
+	// The model property is only present when models are available; make sure
+	// the model enum specifically is absent (the reasoning enum is always
+	// present, so we can't just check for the substring "enum").
+	if strings.Contains(schemaStr, `"model"`) {
+		t.Errorf("expected no model property in schema when no available models, got %s", schemaStr)
 	}
 	if strings.Contains(llmTool.Description, "Available models") {
 		t.Errorf("expected no model list in description when no available models")
+	}
+}
+
+func TestSubagentTool_InheritsReasoning(t *testing.T) {
+	tool := &SubagentTool{
+		DB:                   newMockSubagentDB(),
+		ParentConversationID: "parent-123",
+		WorkingDir:           NewMutableWorkingDir("/tmp"),
+		Runner:               &mockSubagentRunner{response: "OK"},
+		ParentReasoning:      "high",
+	}
+
+	runner := tool.Runner.(*mockSubagentRunner)
+	input := subagentInput{Slug: "test", Prompt: "do something"}
+	inputJSON, _ := json.Marshal(input)
+	tool.Tool().Run(context.Background(), inputJSON)
+
+	if runner.lastReasoning != "high" {
+		t.Errorf("expected inherited reasoning 'high', got %q", runner.lastReasoning)
+	}
+}
+
+func TestSubagentTool_ReasoningOverride(t *testing.T) {
+	tool := &SubagentTool{
+		DB:                   newMockSubagentDB(),
+		ParentConversationID: "parent-123",
+		WorkingDir:           NewMutableWorkingDir("/tmp"),
+		Runner:               &mockSubagentRunner{response: "OK"},
+		ParentReasoning:      "high",
+	}
+
+	// The reasoning enum is always present in the schema.
+	schemaJSON, _ := json.Marshal(tool.Tool().InputSchema)
+	if !strings.Contains(string(schemaJSON), `"reasoning"`) {
+		t.Errorf("expected reasoning property in schema, got %s", schemaJSON)
+	}
+
+	runner := tool.Runner.(*mockSubagentRunner)
+	input := subagentInput{Slug: "test", Prompt: "do something", Reasoning: "low"}
+	inputJSON, _ := json.Marshal(input)
+	tool.Tool().Run(context.Background(), inputJSON)
+
+	if runner.lastReasoning != "low" {
+		t.Errorf("expected reasoning override 'low', got %q", runner.lastReasoning)
+	}
+}
+
+func TestSubagentTool_ReasoningOverride_Invalid(t *testing.T) {
+	tool := &SubagentTool{
+		DB:                   newMockSubagentDB(),
+		ParentConversationID: "parent-123",
+		WorkingDir:           NewMutableWorkingDir("/tmp"),
+		Runner:               &mockSubagentRunner{response: "OK"},
+	}
+
+	input := subagentInput{Slug: "test", Prompt: "do something", Reasoning: "turbo"}
+	inputJSON, _ := json.Marshal(input)
+	result := tool.Tool().Run(context.Background(), inputJSON)
+	if result.Error == nil {
+		t.Fatal("expected error for invalid reasoning level")
+	}
+	if !strings.Contains(result.Error.Error(), "turbo") {
+		t.Errorf("expected error to mention invalid level, got %v", result.Error)
 	}
 }

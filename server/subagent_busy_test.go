@@ -5,6 +5,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"shelley.exe.dev/db"
+	"shelley.exe.dev/db/generated"
 )
 
 // These tests cover sending a message to a subagent whose current turn is
@@ -18,6 +21,47 @@ func TestSubagentBusy(t *testing.T) {
 	t.Run("WaitTrue_WaitsForIdleThenSends_NoCancel", testSubagentBusy_WaitTrueWaitsForIdle)
 	t.Run("WaitTrue_DeadlineDuringInFlightTurn_ReturnsProgress", testSubagentBusy_WaitTrueDeadline)
 	t.Run("WaitTrue_InFlightFinishThenFollowupTimeout_NoPrematureNotify", testSubagentBusy_InFlightFinishThenFollowupTimeout)
+}
+
+// A reasoning level passed to RunSubagent must be persisted on the subagent's
+// conversation options so the loop picks it up. An empty reasoning string is a
+// no-op and must not overwrite an existing level.
+func TestSubagentRunner_PersistsReasoning(t *testing.T) {
+	f := newSubagentDoneFixture(t, "irrelevant")
+	ctx := context.Background()
+
+	runner := NewSubagentRunner(f.server)
+	// Send with an explicit reasoning level; wait=false returns immediately.
+	if _, err := runner.RunSubagent(ctx, f.subagentID, "do it", false, time.Minute, "predictable", "high"); err != nil {
+		t.Fatalf("RunSubagent(reasoning=high): %v", err)
+	}
+
+	var opts string
+	if err := f.database.Queries(ctx, func(q *generated.Queries) error {
+		var e error
+		opts, e = q.GetConversationOptions(ctx, f.subagentID)
+		return e
+	}); err != nil {
+		t.Fatalf("get conversation options: %v", err)
+	}
+	if got := db.ParseConversationOptions(opts).ThinkingLevel; got != "high" {
+		t.Fatalf("expected persisted thinking_level 'high', got %q", got)
+	}
+
+	// A subsequent empty reasoning must not clobber the stored level.
+	if _, err := runner.RunSubagent(ctx, f.subagentID, "again", false, time.Minute, "predictable", ""); err != nil {
+		t.Fatalf("RunSubagent(reasoning=\"\"): %v", err)
+	}
+	if err := f.database.Queries(ctx, func(q *generated.Queries) error {
+		var e error
+		opts, e = q.GetConversationOptions(ctx, f.subagentID)
+		return e
+	}); err != nil {
+		t.Fatalf("get conversation options: %v", err)
+	}
+	if got := db.ParseConversationOptions(opts).ThinkingLevel; got != "high" {
+		t.Fatalf("empty reasoning clobbered level; got %q", got)
+	}
 }
 
 // pendingBatchCount returns the number of queued pending batches (test-only,
@@ -58,7 +102,7 @@ func testSubagentBusy_WaitFalseQueues(t *testing.T) {
 	f.subagentMgr.SetAgentWorking(true)
 
 	runner := NewSubagentRunner(f.server)
-	res, err := runner.RunSubagent(context.Background(), f.subagentID, "do this next", false, time.Minute, "predictable")
+	res, err := runner.RunSubagent(context.Background(), f.subagentID, "do this next", false, time.Minute, "predictable", "")
 	if err != nil {
 		t.Fatalf("RunSubagent(wait=false): %v", err)
 	}
@@ -92,7 +136,7 @@ func testSubagentBusy_WaitTrueWaitsForIdle(t *testing.T) {
 	parentBefore := countSyntheticDonePairs(t, f.parentMessages())
 
 	runner := NewSubagentRunner(f.server)
-	res, err := runner.RunSubagent(context.Background(), f.subagentID, "echo: foo", true, 10*time.Second, "predictable")
+	res, err := runner.RunSubagent(context.Background(), f.subagentID, "echo: foo", true, 10*time.Second, "predictable", "")
 	if err != nil {
 		t.Fatalf("RunSubagent(wait=true): %v", err)
 	}
@@ -123,7 +167,7 @@ func testSubagentBusy_WaitTrueDeadline(t *testing.T) {
 	f.subagentMgr.SetAgentWorking(true)
 
 	runner := NewSubagentRunner(f.server)
-	res, err := runner.RunSubagent(context.Background(), f.subagentID, "echo: foo", true, 300*time.Millisecond, "predictable")
+	res, err := runner.RunSubagent(context.Background(), f.subagentID, "echo: foo", true, 300*time.Millisecond, "predictable", "")
 	if err != nil {
 		t.Fatalf("RunSubagent(wait=true) deadline: %v", err)
 	}
@@ -167,7 +211,7 @@ func testSubagentBusy_InFlightFinishThenFollowupTimeout(t *testing.T) {
 	f.llmSvc.SetResponseDelay(2 * time.Second)
 
 	runner := NewSubagentRunner(f.server)
-	res, err := runner.RunSubagent(context.Background(), f.subagentID, "echo: foo", true, 700*time.Millisecond, "predictable")
+	res, err := runner.RunSubagent(context.Background(), f.subagentID, "echo: foo", true, 700*time.Millisecond, "predictable", "")
 	if err != nil {
 		t.Fatalf("RunSubagent(wait=true): %v", err)
 	}

@@ -27,7 +27,7 @@ func NewSubagentRunner(s *Server) *SubagentRunner {
 }
 
 // RunSubagent implements claudetool.SubagentRunner.
-func (r *SubagentRunner) RunSubagent(ctx context.Context, conversationID, prompt string, wait bool, timeout time.Duration, modelID string) (string, error) {
+func (r *SubagentRunner) RunSubagent(ctx context.Context, conversationID, prompt string, wait bool, timeout time.Duration, modelID, reasoning string) (string, error) {
 	s := r.server
 
 	// Notify the UI about the subagent conversation.
@@ -79,6 +79,17 @@ func (r *SubagentRunner) RunSubagent(ctx context.Context, conversationID, prompt
 	manager, err := s.getOrCreateSubagentConversationManager(ctx, conversationID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get conversation manager: %w", err)
+	}
+
+	// Apply the requested reasoning level (inherited from the parent when the
+	// caller didn't specify one). Must happen before AcceptUserMessage, which
+	// builds the loop from the conversation's stored options. Empty reasoning
+	// is a no-op, leaving the subagent's existing/default level intact.
+	//
+	// Fail loudly rather than run the subagent at the wrong reasoning level
+	// while reporting success: the level is part of what the caller asked for.
+	if err := manager.SetThinkingLevel(ctx, reasoning); err != nil {
+		return "", fmt.Errorf("failed to set subagent reasoning level %q: %w", reasoning, err)
 	}
 
 	// Use the parent's model if provided, otherwise fall back to server

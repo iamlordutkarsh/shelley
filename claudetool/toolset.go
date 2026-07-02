@@ -49,6 +49,11 @@ type ToolSetConfig struct {
 	// ModelID is the model being used for this conversation.
 	// Used to determine tool configuration (e.g., simplified patch schema for weaker models).
 	ModelID string
+	// ReasoningLevel is the parent conversation's user-facing reasoning/thinking
+	// level (one of "off", "minimal", "low", "medium", "high", "xhigh", or ""
+	// for the service default). Subagents inherit this when their "reasoning"
+	// parameter is not specified.
+	ReasoningLevel string
 	// OnWorkingDirChange is called when the working directory changes.
 	// This can be used to persist the change to a database.
 	OnWorkingDirChange func(newDir string)
@@ -126,6 +131,9 @@ type OrchestratorToolSetConfig struct {
 	ParentConversationID string
 	// ModelID is the model being used for this conversation.
 	ModelID string
+	// ReasoningLevel is the parent conversation's user-facing reasoning/thinking
+	// level; subagents inherit it when their "reasoning" parameter is omitted.
+	ReasoningLevel string
 	// LLMProvider provides access to LLM services.
 	LLMProvider LLMServiceProvider
 	// BuildAvailableModels is called to compute the list of models that
@@ -213,6 +221,7 @@ func NewOrchestratorToolSet(ctx context.Context, cfg OrchestratorToolSetConfig) 
 			Runner:               cfg.SubagentRunner,
 			ModelID:              cfg.ModelID,
 			AvailableModels:      availableModels,
+			ParentReasoning:      cfg.ReasoningLevel,
 		}
 		tools = append(tools, subagentTool.Tool())
 	}
@@ -367,6 +376,7 @@ func NewToolSet(ctx context.Context, cfg ToolSetConfig) *ToolSet {
 			Runner:               cfg.SubagentRunner,
 			ModelID:              cfg.ModelID, // Inherit parent's model
 			AvailableModels:      availableModels,
+			ParentReasoning:      cfg.ReasoningLevel,
 		}
 		tools = append(tools, subagentTool.Tool())
 	}

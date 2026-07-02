@@ -143,6 +143,11 @@ type ConversationManager struct {
 	// retryMu serializes RetryLastLLMRequest so concurrent retry POSTs don't
 	// produce duplicate LLM calls or double-broadcast user_data updates.
 	retryMu sync.Mutex
+	// thinkingMu serializes SetThinkingLevel so concurrent calls can't leave
+	// the in-memory conversationOptions / loop level inconsistent with the
+	// persisted value (an earlier call's in-memory assignment racing a later
+	// call's DB write).
+	thinkingMu sync.Mutex
 	// lastRetriedErrorMessageID dedupes retry double-clicks WITHOUT mutating the
 	// error message row (which would reintroduce the immutability violation).
 	// Guarded by cm.mu. Once a retry kicks off for a given bottom error message,
@@ -252,6 +257,60 @@ func (cm *ConversationManager) RegisterEndOfTurnHook(ctx context.Context, hook d
 	cm.mu.Lock()
 	cm.conversationOptions = opts
 	cm.mu.Unlock()
+	return nil
+}
+
+// SetThinkingLevel updates the conversation's reasoning/thinking level. It
+// persists the new level to the conversation's stored options and, if a loop
+// is already running, updates it live so the next turn uses the new level.
+// reasoning is a user-facing level name ("off", "minimal", "low", "medium",
+// "high", "xhigh").
+//
+// An empty string is a no-op: it keeps whatever level the conversation already
+// has rather than resetting to the service default. This is deliberate for the
+// subagent path — a caller who omits "reasoning" on a follow-up message must
+// not silently downgrade a subagent that was previously given an explicit
+// level. Inheriting the parent's level happens at the tool layer
+// (SubagentTool.ParentReasoning), which only reaches here with a concrete
+// level, never "".
+//
+// thinkingMu serializes the whole DB-write-then-apply sequence so concurrent
+// calls can't persist one level while an earlier call's in-memory assignment
+// leaves conversationOptions / the loop pinned to a stale level.
+func (cm *ConversationManager) SetThinkingLevel(ctx context.Context, reasoning string) error {
+	if reasoning == "" {
+		return nil
+	}
+	if err := cm.Hydrate(ctx); err != nil {
+		return err
+	}
+
+	cm.thinkingMu.Lock()
+	defer cm.thinkingMu.Unlock()
+
+	cm.mu.Lock()
+	if cm.conversationOptions.ThinkingLevel == reasoning {
+		cm.mu.Unlock()
+		return nil
+	}
+	cm.mu.Unlock()
+
+	// Atomic read-modify-write of the stored options blob so a concurrent
+	// mutation of a different option field (e.g. RegisterConversationHook)
+	// can't clobber, or be clobbered by, this update.
+	opts, err := cm.db.SetConversationThinkingLevel(ctx, cm.conversationID, reasoning)
+	if err != nil {
+		return err
+	}
+
+	cm.mu.Lock()
+	cm.conversationOptions = opts
+	loopInstance := cm.loop
+	cm.mu.Unlock()
+
+	if loopInstance != nil {
+		loopInstance.SetThinkingLevel(llm.ParseThinkingLevel(reasoning))
+	}
 	return nil
 }
 
@@ -1550,10 +1609,12 @@ func (cm *ConversationManager) ensureLoop(service llm.Service, modelID string) e
 			CLIAgent:             conversationOpts.SubagentBackend,
 			ToolOverrides:        conversationOpts.ToolOverrides,
 			DisableAllTools:      conversationOpts.DisableAllTools,
+			ReasoningLevel:       conversationOpts.ThinkingLevel,
 		})
 	} else {
 		toolSetConfig.ToolOverrides = conversationOpts.ToolOverrides
 		toolSetConfig.DisableAllTools = conversationOpts.DisableAllTools
+		toolSetConfig.ReasoningLevel = conversationOpts.ThinkingLevel
 		toolSet = claudetool.NewToolSet(processCtx, toolSetConfig)
 	}
 

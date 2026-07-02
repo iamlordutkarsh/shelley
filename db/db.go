@@ -320,6 +320,35 @@ func (db *DB) RegisterConversationHook(ctx context.Context, conversationID strin
 	return opts, err
 }
 
+// SetConversationThinkingLevel atomically updates the reasoning/thinking level
+// in a conversation's stored options, preserving all other option fields. It
+// returns the resulting options. reasoning is a user-facing level name
+// ("off", "minimal", "low", "medium", "high", "xhigh").
+func (db *DB) SetConversationThinkingLevel(ctx context.Context, conversationID, reasoning string) (ConversationOptions, error) {
+	var opts ConversationOptions
+	err := db.pool.Tx(ctx, func(ctx context.Context, tx *Tx) error {
+		q := generated.New(tx.Conn())
+		raw, err := q.GetConversationOptions(ctx, conversationID)
+		if err != nil {
+			return err
+		}
+		opts = ParseConversationOptions(raw)
+		if opts.ThinkingLevel == reasoning {
+			return nil
+		}
+		opts.ThinkingLevel = reasoning
+		optsJSON, err := json.Marshal(opts)
+		if err != nil {
+			return fmt.Errorf("failed to marshal conversation options: %w", err)
+		}
+		return q.UpdateConversationOptions(ctx, generated.UpdateConversationOptionsParams{
+			ConversationID:      conversationID,
+			ConversationOptions: string(optsJSON),
+		})
+	})
+	return opts, err
+}
+
 // CreateConversation creates a new conversation with an optional slug.
 func (db *DB) CreateConversation(ctx context.Context, slug *string, userInitiated bool, cwd, model *string, opts ConversationOptions) (*generated.Conversation, error) {
 	conversationID, err := generateConversationID()

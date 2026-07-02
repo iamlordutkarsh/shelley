@@ -16,7 +16,24 @@ type SubagentRunner interface {
 	// If wait is false, it starts processing in background and returns immediately.
 	// timeout is the maximum time to wait for a response.
 	// modelID is the model to use for the subagent.
-	RunSubagent(ctx context.Context, conversationID, prompt string, wait bool, timeout time.Duration, modelID string) (string, error)
+	// reasoning is the user-facing reasoning/thinking level for the subagent
+	// (one of "off", "minimal", "low", "medium", "high", "xhigh"); an empty
+	// string means "use the service/conversation default".
+	RunSubagent(ctx context.Context, conversationID, prompt string, wait bool, timeout time.Duration, modelID, reasoning string) (string, error)
+}
+
+// subagentReasoningLevels are the user-facing reasoning/thinking levels a
+// subagent may be given via the "reasoning" parameter.
+var subagentReasoningLevels = []string{"off", "minimal", "low", "medium", "high", "xhigh"}
+
+// isValidReasoningLevel reports whether s is a recognized reasoning level.
+func isValidReasoningLevel(s string) bool {
+	for _, l := range subagentReasoningLevels {
+		if s == l {
+			return true
+		}
+	}
+	return false
 }
 
 // AvailableModel describes a model available for subagent use.
@@ -42,6 +59,11 @@ type SubagentTool struct {
 	Runner               SubagentRunner
 	ModelID              string           // Parent conversation's model ID (default for subagents)
 	AvailableModels      []AvailableModel // Models the agent can choose from
+	// ParentReasoning is the parent conversation's user-facing reasoning level
+	// (one of "off", "minimal", "low", "medium", "high", "xhigh", or "" for the
+	// service default). Subagents inherit this when the "reasoning" parameter is
+	// not specified.
+	ParentReasoning string
 }
 
 const subagentName = "subagent"
@@ -71,7 +93,11 @@ The tool returns the subagent's last response, or a status if the timeout is rea
 
 When writing prompts for subagents, convey intent, nuance, and operational
 details — not just prescriptive instructions. The subagent has no context
-beyond what you put in the prompt, so share the "why" alongside the "what".`
+beyond what you put in the prompt, so share the "why" alongside the "what".
+
+Use the "reasoning" parameter to set the subagent's thinking effort (off,
+minimal, low, medium, high, xhigh). If omitted, the subagent inherits the
+parent conversation's reasoning level.`
 
 	if len(s.AvailableModels) > 0 {
 		base += "\n\nAvailable models (use the \"model\" parameter to override the default):"
@@ -104,6 +130,18 @@ func (s *SubagentTool) subagentInputSchema() string {
     }`, strings.Join(enumItems, ", "))
 	}
 
+	// reasoning is always available, regardless of the model catalog.
+	var reasoningEnum []string
+	for _, l := range subagentReasoningLevels {
+		reasoningEnum = append(reasoningEnum, fmt.Sprintf("%q", l))
+	}
+	reasoningProp := fmt.Sprintf(`,
+    "reasoning": {
+      "type": "string",
+      "description": "Reasoning/thinking effort level for the subagent. If omitted, the subagent inherits the parent conversation's reasoning level.",
+      "enum": [%s]
+    }`, strings.Join(reasoningEnum, ", "))
+
 	return fmt.Sprintf(`{
   "type": "object",
   "required": ["slug", "prompt"],
@@ -123,9 +161,9 @@ func (s *SubagentTool) subagentInputSchema() string {
     "wait": {
       "type": "boolean",
       "description": "Whether to wait for completion (default: true). If false, returns immediately; when the subagent eventually finishes, its response is delivered asynchronously. If wait=true and the subagent completes before timeout, no later asynchronous duplicate is delivered. Sending a new message to a subagent that is still working does NOT interrupt it: the message is queued and delivered after the current turn finishes."
-    }%s
+    }%s%s
   }
-}`, modelProp)
+}`, modelProp, reasoningProp)
 }
 
 type subagentInput struct {
@@ -134,6 +172,7 @@ type subagentInput struct {
 	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
 	Wait           *bool  `json:"wait,omitempty"`
 	Model          string `json:"model,omitempty"`
+	Reasoning      string `json:"reasoning,omitempty"`
 }
 
 // Tool returns an llm.Tool for the subagent functionality.
@@ -198,6 +237,15 @@ func (s *SubagentTool) run(ctx context.Context, req subagentInput) llm.ToolOut {
 		modelID = req.Model
 	}
 
+	// Determine reasoning level: explicit choice > parent's reasoning level.
+	reasoning := s.ParentReasoning
+	if req.Reasoning != "" {
+		if !isValidReasoningLevel(req.Reasoning) {
+			return llm.ErrorfToolOut("unknown reasoning level %q; available: %s", req.Reasoning, strings.Join(subagentReasoningLevels, ", "))
+		}
+		reasoning = req.Reasoning
+	}
+
 	// Get or create the subagent conversation
 	conversationID, actualSlug, err := s.DB.GetOrCreateSubagentConversation(ctx, req.Slug, s.ParentConversationID, s.WorkingDir.Get())
 	if err != nil {
@@ -205,7 +253,7 @@ func (s *SubagentTool) run(ctx context.Context, req subagentInput) llm.ToolOut {
 	}
 
 	// Use the runner to execute the subagent
-	response, err := s.Runner.RunSubagent(ctx, conversationID, req.Prompt, wait, timeout, modelID)
+	response, err := s.Runner.RunSubagent(ctx, conversationID, req.Prompt, wait, timeout, modelID, reasoning)
 	if err != nil {
 		return llm.ErrorfToolOut("subagent error: %w", err)
 	}
