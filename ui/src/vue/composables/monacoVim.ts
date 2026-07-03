@@ -37,20 +37,47 @@ export function useVimEnabled(): [Ref<boolean>, (v: boolean) => void] {
   return [enabledRef, update];
 }
 
-// Attach a monaco-vim adapter to `editor` whenever vim mode is enabled.
-// Pass reactive getters for editor/statusBar/enabled. `onQuit` (if provided)
-// fires on :q/:wq/:x/ZZ/ZQ with { save }.
-export function useMonacoVim(
-  getEditor: () => Monaco.editor.IStandaloneCodeEditor | null,
-  getStatusBar: () => HTMLElement | null,
-  getEnabled: () => boolean,
-  onQuit?: (opts: { save: boolean }) => void,
-): void {
+// Framework-free attach/detach state machine for the monaco-vim adapter,
+// extracted so the async-race behavior is unit-testable (see
+// monacoVim.test.ts). `sync()` is called on every reactive change; it always
+// detaches any live adapter and, if the getters say vim should be on, kicks
+// off an async attach.
+//
+// Correctness hinges on the generation counter: every detach (and every new
+// attach) bumps it, and an in-flight async attach only completes if its
+// generation is still current. A single shared "cancelled" boolean is NOT
+// enough — sync() runs overlap while the monaco-vim module loads (e.g.
+// enabling vim triggers one run immediately and a second when the v-if'd
+// status bar node mounts), and the later run re-arming the flag would
+// "un-cancel" the earlier pending attach. That leaked a second adapter on
+// the same editor, double-handling every keystroke (doubled characters,
+// confused vim mode).
+export interface VimAttachDeps {
+  getEditor: () => Monaco.editor.IStandaloneCodeEditor | null;
+  getStatusBar: () => HTMLElement | null;
+  getEnabled: () => boolean;
+  onQuit?: (opts: { save: boolean }) => void;
+  loadVim?: () => Promise<typeof import("monaco-vim")>;
+  ensureQuitCommands?: () => Promise<void>;
+}
+
+export function createVimAttachController(deps: VimAttachDeps): {
+  sync: () => void;
+  detach: () => void;
+} {
+  const {
+    getEditor,
+    getStatusBar,
+    getEnabled,
+    onQuit,
+    loadVim = loadMonacoVim,
+    ensureQuitCommands = ensureVimQuitCommands,
+  } = deps;
   let adapter: { dispose: () => void } | null = null;
-  let cancelled = false;
+  let generation = 0;
 
   const detach = () => {
-    cancelled = true;
+    generation++;
     adapter?.dispose();
     adapter = null;
     if (onQuit) clearVimQuitHandlerIf(onQuit);
@@ -62,12 +89,12 @@ export function useMonacoVim(
     const editor = getEditor();
     const statusBarNode = getStatusBar();
     if (!editor || !getEnabled()) return;
-    cancelled = false;
-    loadMonacoVim()
+    const gen = ++generation;
+    loadVim()
       .then(async (mod) => {
-        if (cancelled) return;
-        await ensureVimQuitCommands();
-        if (cancelled) return;
+        if (gen !== generation) return;
+        await ensureQuitCommands();
+        if (gen !== generation) return;
         if (onQuit) setVimQuitHandler(onQuit);
         adapter = mod.initVimMode(editor, statusBarNode ?? undefined);
       })
@@ -76,15 +103,25 @@ export function useMonacoVim(
       });
   };
 
-  watch(
-    [getEditor, getStatusBar, getEnabled],
-    () => {
+  return {
+    sync: () => {
       detach();
-      cancelled = false;
       attach();
     },
-    { immediate: true },
-  );
+    detach,
+  };
+}
 
-  onUnmounted(detach);
+// Attach a monaco-vim adapter to `editor` whenever vim mode is enabled.
+// Pass reactive getters for editor/statusBar/enabled. `onQuit` (if provided)
+// fires on :q/:wq/:x/ZZ/ZQ with { save }.
+export function useMonacoVim(
+  getEditor: () => Monaco.editor.IStandaloneCodeEditor | null,
+  getStatusBar: () => HTMLElement | null,
+  getEnabled: () => boolean,
+  onQuit?: (opts: { save: boolean }) => void,
+): void {
+  const controller = createVimAttachController({ getEditor, getStatusBar, getEnabled, onQuit });
+  watch([getEditor, getStatusBar, getEnabled], controller.sync, { immediate: true });
+  onUnmounted(controller.detach);
 }
