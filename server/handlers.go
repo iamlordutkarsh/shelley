@@ -1116,28 +1116,31 @@ func (s *Server) handleChatConversation(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Resolve the model. Precedence:
-	//  1. an explicit `model` in the request (for a draft, this also
-	//     retargets the conversation via the promote branch below),
-	//  2. the conversation's own persisted model (a running loop is pinned
-	//     to its model, so any other choice would 400 with
-	//     errConversationModelMismatch),
+	// Resolve the model. The conversation's own persisted model is
+	// authoritative for an existing (non-draft) conversation: the web UI
+	// hides the model picker once a conversation is under way, so the
+	// `model` it keeps attaching to every send is a stale composer default.
+	// Honoring it would silently revert a mid-conversation /model switch and
+	// rebuild the loop on the wrong model. Precedence:
+	//  1. the conversation's own persisted model, if set (non-draft),
+	//  2. an explicit `model` in the request (new conversations reach this
+	//     via handleNewConversation; drafts retarget via the promote branch
+	//     below, which runs before the loop is built),
 	//  3. the host's effective default (conversations that never recorded a
-	//     model).
+	//     model and whose request omits one).
 	//
 	// Clients that don't track a conversation's model — notably the iOS
 	// push "Reply" handler, which fires from a background launch with no
-	// loaded chat state — send an empty `model`. Before this, the empty
-	// model resolved straight to effectiveDefaultModel, so a reply to any
-	// conversation running a non-default model was silently rejected and
-	// never reached the agent.
+	// loaded chat state — send an empty `model`; case 1 covers them too.
 	modelID := req.Model
+	if existing.Model != nil && *existing.Model != "" && (!existing.IsDraft || modelID == "") {
+		// Non-draft: persisted model wins outright (stale req.Model ignored).
+		// Draft: persisted model is only the fallback when the request omits
+		// one; an explicit req.Model on a draft retargets it (handled below).
+		modelID = *existing.Model
+	}
 	if modelID == "" {
-		if existing.Model != nil && *existing.Model != "" {
-			modelID = *existing.Model
-		} else {
-			modelID = s.effectiveDefaultModel(s.getModelList())
-		}
+		modelID = s.effectiveDefaultModel(s.getModelList())
 	}
 
 	llmService, err := s.llmManager.GetService(modelID)
@@ -1202,6 +1205,12 @@ func (s *Server) handleChatConversation(w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		s.logger.Error("Failed to get conversation manager", "conversationID", conversationID, "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Built-in /model command: switch the conversation to a different model
+	// mid-conversation. Handled entirely here — it never reaches the LLM.
+	if s.handleModelCommand(ctx, w, conversationID, modelID, manager, req.Message) {
 		return
 	}
 
@@ -2137,6 +2146,276 @@ type ModelInfo struct {
 	DefaultReasoningLevel string `json:"default_reasoning_level,omitempty"`
 }
 
+// handleModelCommand intercepts the built-in "/model" slash command. It
+// returns true when the message was a /model command (in which case the HTTP
+// response has already been written and the caller must stop processing), and
+// false when the message should continue down the normal chat path.
+//
+// Usage:
+//
+//	/model                    — replies with the current model/reasoning and
+//	                            the available options.
+//	/model <a> [b]            — a and b are each either a model or a reasoning
+//	                            level, in any order (at most one of each).
+//
+// Arguments are matched leniently. A reasoning level accepts its full name
+// (off, minimal, low, medium, high, xhigh) or any unambiguous prefix ("med",
+// "hi"). A model accepts an exact id, a case/dot-insensitive spelling, a unique
+// id prefix, or a unique partial ("opus-4.8", "sonnet-5"). A partial that
+// matches several models is reported with the candidates so the user can pick.
+// If a single token resolves as both a model and a level (e.g. a model
+// literally named "high"), the command is rejected as ambiguous.
+//
+// The change drops the in-memory loop (pinned to the old model/reasoning) and
+// records a user-visible modelchange marker so the log shows where it happened.
+func (s *Server) handleModelCommand(ctx context.Context, w http.ResponseWriter, conversationID, currentModel string, manager *ConversationManager, message string) bool {
+	fields := strings.Fields(strings.TrimSpace(message))
+	if len(fields) == 0 || fields[0] != "/model" {
+		return false
+	}
+
+	modelList := s.getModelList()
+	currentReasoning := manager.GetThinkingLevel()
+	args := fields[1:]
+
+	// Bare "/model": report the current model/reasoning and the options.
+	if len(args) == 0 {
+		s.recordModelCommandReply(ctx, conversationID, manager, modelCommandStatus(currentModel, currentReasoning, modelList))
+		writeModelCommandAccepted(w)
+		return true
+	}
+
+	reply := func(text string) bool {
+		s.recordModelCommandReply(ctx, conversationID, manager, text)
+		writeModelCommandAccepted(w)
+		return true
+	}
+
+	// Classify each argument by value, leniently.
+	var newModel, newReasoning string
+	var reasoningSet, modelSet bool
+	for _, a := range args {
+		level, isLevel := resolveReasoningArg(a)
+		modelID, modelCandidates, modelStrong := resolveModelArg(a, modelList)
+		isModel := modelID != ""
+
+		// A token that resolves as both a model and a reasoning level is
+		// ambiguous — but only when the model match is strong (an exact id or a
+		// prefix). A weak substring match (e.g. "o" for off happening to appear
+		// inside some model id) must not override an explicit level, so drop it.
+		switch {
+		case isLevel && isModel && modelStrong:
+			return reply(fmt.Sprintf("Ambiguous argument %q: it is both a model and a reasoning level. Rename the model to disambiguate.", a))
+		case isLevel && isModel:
+			isModel = false
+			modelID = ""
+		}
+
+		switch {
+		case isLevel:
+			if reasoningSet {
+				return reply(fmt.Sprintf("Reasoning level specified more than once (%q).", a))
+			}
+			reasoningSet = true
+			newReasoning = level
+		case isModel:
+			if modelSet {
+				return reply(fmt.Sprintf("Model specified more than once (%q).", a))
+			}
+			modelSet = true
+			newModel = modelID
+		case len(modelCandidates) > 0:
+			// A partial that matched several models: help the user narrow it.
+			return reply(fmt.Sprintf("%q matches several models: %s. Be more specific.", a, strings.Join(modelCandidates, ", ")))
+		default:
+			return reply(fmt.Sprintf("Unknown or unavailable option %q.\n\n%s", a, modelCommandStatus(currentModel, currentReasoning, modelList)))
+		}
+	}
+
+	// Validate the chosen model is present, ready, and constructible.
+	if modelSet {
+		if _, err := s.llmManager.GetService(newModel); err != nil || !isReadyModel(newModel, modelList) {
+			return reply(fmt.Sprintf("Unknown or unavailable model %q.\n\n%s", newModel, modelCommandStatus(currentModel, currentReasoning, modelList)))
+		}
+	}
+
+	// Reduce to the actual deltas: ignore no-op changes.
+	ch := ModelSettingsChange{OldModel: currentModel, OldReasoning: currentReasoning}
+	if modelSet && newModel != currentModel {
+		ch.NewModel = newModel
+		ch.OldModelDisplay = modelDisplayName(currentModel, modelList)
+		ch.NewModelDisplay = modelDisplayName(newModel, modelList)
+	}
+	if reasoningSet && newReasoning != currentReasoning {
+		ch.ReasoningSet = true
+		ch.NewReasoning = newReasoning
+	}
+
+	if ch.NewModel == "" && !ch.ReasoningSet {
+		return reply(fmt.Sprintf("Already using model %s with reasoning %s.", currentModel, reasoningDisplayName(currentReasoning)))
+	}
+
+	if err := manager.ApplyModelSettings(ctx, ch); err != nil {
+		s.logger.Error("Failed to apply model settings", "conversationID", conversationID, "error", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return true
+	}
+	// ApplyModelSettings already broadcast the updated conversation (carrying
+	// the new model) alongside the modelchange marker, so the composer follows
+	// without an extra notify here.
+	writeModelCommandAccepted(w)
+	return true
+}
+
+// reasoningLevelNames are the user-facing reasoning levels accepted by /model.
+// They match the levels offered by the ThinkingLevelPicker in the UI. The word
+// "default" is deliberately not a level: it selects the default MODEL instead.
+var reasoningLevelNames = []string{"off", "minimal", "low", "medium", "high", "xhigh"}
+
+func isReasoningLevelName(s string) bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	for _, name := range reasoningLevelNames {
+		if s == name {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveReasoningArg matches a /model argument to a reasoning level, leniently.
+// It accepts an exact level name or any unambiguous case-insensitive prefix
+// ("med" → medium, "hi" → high). It returns the canonical level and true on a
+// unique match; a prefix that matches several levels (e.g. "m" → minimal,
+// medium) yields false so the token falls through to model resolution / error.
+func resolveReasoningArg(arg string) (string, bool) {
+	s := strings.ToLower(strings.TrimSpace(arg))
+	if s == "" {
+		return "", false
+	}
+	var matches []string
+	for _, name := range reasoningLevelNames {
+		if name == s {
+			return name, true // exact wins outright
+		}
+		if strings.HasPrefix(name, s) {
+			matches = append(matches, name)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], true
+	}
+	return "", false
+}
+
+// resolveModelArg matches a /model argument to a ready model id, leniently. In
+// priority order: an exact id; a case/dot-insensitive exact spelling; a unique
+// id prefix; a unique substring match. It returns (id, nil, strong) on a unique
+// match, where strong is true for the exact/normalized/prefix tiers and false
+// for a mere substring match. When several models match a partial it returns
+// ("", candidates, false) so the caller can ask the user to disambiguate; no
+// match returns ("", nil, false).
+//
+// The strong flag lets the caller avoid a false "ambiguous" rejection: a
+// single-letter level prefix like "o" (off) can incidentally be a substring of
+// some model id, but that weak match must not override an explicit level.
+func resolveModelArg(arg string, modelList []ModelInfo) (string, []string, bool) {
+	norm := func(s string) string { return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(s)), ".", "-") }
+	want := norm(arg)
+	if want == "" {
+		return "", nil, false
+	}
+
+	var exact, prefix, substr []string
+	for _, m := range modelList {
+		if !m.Ready {
+			continue
+		}
+		if m.ID == strings.TrimSpace(arg) {
+			return m.ID, nil, true // exact id wins outright
+		}
+		id := norm(m.ID)
+		switch {
+		case id == want:
+			exact = append(exact, m.ID)
+		case strings.HasPrefix(id, want):
+			prefix = append(prefix, m.ID)
+		case strings.Contains(id, want):
+			substr = append(substr, m.ID)
+		}
+	}
+	// Most-specific non-empty tier wins; a unique entry resolves, multiple ask.
+	// The first two tiers (exact, prefix) are strong; substring is weak.
+	for i, tier := range [][]string{exact, prefix, substr} {
+		strong := i < 2
+		if len(tier) == 1 {
+			return tier[0], nil, strong
+		}
+		if len(tier) > 1 {
+			return "", tier, false
+		}
+	}
+	return "", nil, false
+}
+
+// modelDisplayName returns the human-friendly display name for a model id, or
+// the id itself when the model isn't in the list or has no distinct display
+// name.
+func modelDisplayName(id string, modelList []ModelInfo) string {
+	for _, m := range modelList {
+		if m.ID == id {
+			if m.DisplayName != "" {
+				return m.DisplayName
+			}
+			return m.ID
+		}
+	}
+	return id
+}
+
+// isReadyModel reports whether id names a model that is present and ready.
+func isReadyModel(id string, modelList []ModelInfo) bool {
+	for _, m := range modelList {
+		if m.ID == id {
+			return m.Ready
+		}
+	}
+	return false
+}
+
+// modelCommandStatus builds the human-readable body shown for a bare /model
+// command or an invalid argument: the current model and reasoning level plus
+// the available options.
+func modelCommandStatus(currentModel, currentReasoning string, modelList []ModelInfo) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Current model: %s\nCurrent reasoning: %s", currentModel, reasoningDisplayName(currentReasoning))
+	b.WriteString("\n\nAvailable models:")
+	for _, m := range modelList {
+		if !m.Ready {
+			continue
+		}
+		name := m.ID
+		if m.DisplayName != "" && m.DisplayName != m.ID {
+			name = fmt.Sprintf("%s (%s)", m.ID, m.DisplayName)
+		}
+		fmt.Fprintf(&b, "\n  /model %s", name)
+	}
+	fmt.Fprintf(&b, "\n\nReasoning levels (use as /model <level> or /model <id> <level>): %s", strings.Join(reasoningLevelNames, ", "))
+	return b.String()
+}
+
+// recordModelCommandReply records a modelchange marker carrying an informational
+// reply (bare /model, already-using, or an error) without actually switching.
+func (s *Server) recordModelCommandReply(ctx context.Context, conversationID string, manager *ConversationManager, text string) {
+	if err := manager.recordModelCommandInfo(ctx, text); err != nil {
+		s.logger.Error("Failed to record /model reply", "conversationID", conversationID, "error", err)
+	}
+}
+
+func writeModelCommandAccepted(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"status": "model-command"})
+}
+
 // getModelList returns the list of available models
 func (s *Server) getModelList() []ModelInfo {
 	modelList := []ModelInfo{}
@@ -2998,6 +3277,16 @@ func (s *Server) handleForkConversation(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// ForkConversation copies the source's CURRENT model/options, but the fork
+	// should continue from the state as of the cutoff. If the source switched
+	// model or reasoning via /model AFTER the cutoff, rewind those changes so
+	// the fork uses what was in effect at the fork point.
+	if err := s.applyForkPointModelState(ctx, conversationID, forked.ConversationID, cutoff); err != nil {
+		s.logger.Error("Failed to set fork-point model state", "conversationID", forked.ConversationID, "error", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
 	// Give the fork a distinct slug derived from the source's, so it shows up
 	// in the drawer with a meaningful name. We do this synchronously (no LLM)
 	// using the source slug as a base; ForkConversation left the slug nil.
@@ -3029,6 +3318,82 @@ func (s *Server) handleForkConversation(w http.ResponseWriter, r *http.Request, 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(forked)
+}
+
+// applyForkPointModelState rewinds the fork's model and reasoning level to what
+// was in effect at the cutoff. ForkConversation seeds the fork with the
+// source's CURRENT model/options; if the source used /model to switch model or
+// reasoning AFTER the cutoff, those later markers would otherwise leak into the
+// fork. We replay the source's modelchange markers that occur strictly after
+// the cutoff, in reverse, to undo each one: a marker recording a change from X
+// to Y means the pre-marker model was X, so the earliest such "from" wins.
+func (s *Server) applyForkPointModelState(ctx context.Context, sourceID, forkID string, cutoff int64) error {
+	msgs, err := s.db.ListMessages(ctx, sourceID)
+	if err != nil {
+		return fmt.Errorf("list source messages: %w", err)
+	}
+
+	// Walk markers after the cutoff in order; the FIRST model "from" and the
+	// FIRST reasoning "from" we encounter are the values in effect at the fork
+	// point (each marker's pre-state). Later markers only reflect changes the
+	// fork should not inherit.
+	var modelAtFork string
+	var haveModel bool
+	var reasoningAtFork string
+	var haveReasoning bool
+	for _, m := range msgs {
+		if m.SequenceID <= cutoff || m.Type != string(db.MessageTypeModelChange) || m.UserData == nil {
+			continue
+		}
+		var ud ModelChangeUserData
+		if err := json.Unmarshal([]byte(*m.UserData), &ud); err != nil {
+			continue // informational markers / malformed payloads carry no state
+		}
+		if !haveModel && ud.To != "" {
+			// ud.From may be "" (first-ever model set); that's still the
+			// correct pre-cutoff state and we record it as "seen".
+			modelAtFork = ud.From
+			haveModel = true
+		}
+		if !haveReasoning && ud.ReasoningTo != "" {
+			// ReasoningFrom is a user-facing name; "default" maps back to the
+			// stored empty level.
+			reasoningAtFork = normalizeReasoningFromDisplay(ud.ReasoningFrom)
+			haveReasoning = true
+		}
+	}
+
+	if haveModel {
+		if modelAtFork == "" {
+			// The conversation had no model before this point; leave the fork's
+			// copied model as-is only if we can't do better. In practice a
+			// conversation always has a model, so this is defensive.
+		} else if err := s.db.ForceUpdateConversationModel(ctx, forkID, modelAtFork); err != nil {
+			return fmt.Errorf("set fork model: %w", err)
+		}
+	}
+	if haveReasoning {
+		fork, err := s.db.GetConversationByID(ctx, forkID)
+		if err != nil {
+			return fmt.Errorf("reload fork: %w", err)
+		}
+		opts := db.ParseConversationOptions(fork.ConversationOptions)
+		opts.ThinkingLevel = reasoningAtFork
+		if err := s.db.UpdateConversationOptions(ctx, forkID, opts); err != nil {
+			return fmt.Errorf("set fork reasoning: %w", err)
+		}
+	}
+	return nil
+}
+
+// normalizeReasoningFromDisplay reverses reasoningDisplayName: the user-facing
+// "default" maps back to the stored empty (service-default) level; every other
+// value is a concrete level name stored verbatim.
+func normalizeReasoningFromDisplay(name string) string {
+	if name == "default" {
+		return ""
+	}
+	return name
 }
 
 // isUniqueConstraintErr reports whether err is a SQLite UNIQUE constraint

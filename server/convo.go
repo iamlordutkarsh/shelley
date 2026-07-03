@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1454,6 +1455,11 @@ func (cm *ConversationManager) partitionMessages(messages []generated.Message) (
 			continue
 		}
 
+		// Skip modelchange markers - user-visible only, not sent to LLM.
+		if msg.Type == string(db.MessageTypeModelChange) {
+			continue
+		}
+
 		// Skip error messages - they are system-generated for user visibility,
 		// but should not be sent to the LLM as they are not part of the conversation
 		if msg.Type == string(db.MessageTypeError) {
@@ -1944,6 +1950,202 @@ func (cm *ConversationManager) recordGitStateChange(ctx context.Context, state *
 
 	// Notify subscribers so the UI updates
 	go cm.notifyGitStateChange(context.WithoutCancel(ctx), createdMsg)
+}
+
+// ModelChangeUserData is the structured data stored in user_data for
+// modelchange marker messages recorded when a conversation switches models
+// and/or reasoning level. The Reasoning* fields carry user-facing level names
+// ("off", "low", ..., or "default" for the service default); they are empty
+// when reasoning didn't change.
+type ModelChangeUserData struct {
+	From          string `json:"from,omitempty"`
+	To            string `json:"to,omitempty"`
+	ReasoningFrom string `json:"reasoning_from,omitempty"`
+	ReasoningTo   string `json:"reasoning_to,omitempty"`
+	// FromDisplay/ToDisplay are the human-friendly model names (e.g. "Claude
+	// Opus 4.8") the UI shows instead of raw ids. Empty when unknown or when
+	// the model didn't change; the UI falls back to From/To.
+	FromDisplay string `json:"from_display,omitempty"`
+	ToDisplay   string `json:"to_display,omitempty"`
+	Text        string `json:"text"`
+}
+
+// ModelSettingsChange describes a requested change to a conversation's model
+// and/or reasoning level. An empty NewModel leaves the model unchanged;
+// ReasoningSet gates the reasoning change (NewReasoning may legitimately be ""
+// to mean "use the service default").
+type ModelSettingsChange struct {
+	OldModel string
+	NewModel string // "" = model unchanged
+	// OldModelDisplay/NewModelDisplay are optional human-friendly model names
+	// (e.g. "Claude Opus 4.8") recorded into the marker for display. Empty is
+	// fine; the marker then shows the raw id.
+	OldModelDisplay string
+	NewModelDisplay string
+
+	ReasoningSet bool   // whether reasoning is being changed
+	OldReasoning string // user-facing name ("" means service default)
+	NewReasoning string // user-facing name ("" means service default)
+}
+
+// GetThinkingLevel returns the conversation's current user-facing reasoning
+// level name ("" means the service default).
+func (cm *ConversationManager) GetThinkingLevel() string {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	return cm.conversationOptions.ThinkingLevel
+}
+
+// ApplyModelSettings changes the model and/or reasoning level the conversation
+// uses for subsequent turns. It persists the new settings, drops the in-memory
+// loop so the next turn rehydrates from the DB with the new model's service and
+// thinking level, and records a user-visible modelchange marker so the log
+// shows exactly where the change happened. Both the model and the reasoning
+// level are baked into the loop at build time, so any change requires a loop
+// rebuild.
+func (cm *ConversationManager) ApplyModelSettings(ctx context.Context, ch ModelSettingsChange) error {
+	// Persist the reasoning level into the conversation options and mirror it
+	// in memory. The loop reset below marks the manager unhydrated, so the next
+	// turn re-reads options from the DB anyway; the in-memory update keeps state
+	// consistent for any reader that runs before rehydration.
+	if ch.ReasoningSet {
+		cm.mu.Lock()
+		opts := cm.conversationOptions
+		opts.ThinkingLevel = ch.NewReasoning
+		cm.conversationOptions = opts
+		cm.mu.Unlock()
+		if err := cm.db.UpdateConversationOptions(ctx, cm.conversationID, opts); err != nil {
+			return fmt.Errorf("failed to persist reasoning level: %w", err)
+		}
+	}
+
+	// Persist the new model. ForceUpdateConversationModel overwrites the
+	// existing value (unlike UpdateConversationModel, which only sets a NULL
+	// model).
+	if ch.NewModel != "" {
+		if err := cm.db.ForceUpdateConversationModel(ctx, cm.conversationID, ch.NewModel); err != nil {
+			return fmt.Errorf("failed to persist model switch: %w", err)
+		}
+	}
+
+	// Drop the loop pinned to the old settings so the next user message rebuilds
+	// it via ensureLoop. When a turn is active we must go through
+	// CancelConversation, not a bare ResetLoop: cancelling records the
+	// end-of-turn marker and clears the (persisted) agent_working flag, so the
+	// thinking indicator doesn't get stuck on. ResetLoop alone would leave
+	// agent_working=true until the next completed turn.
+	if cm.IsAgentWorking() {
+		if err := cm.CancelConversation(ctx); err != nil {
+			return fmt.Errorf("failed to cancel active turn before model change: %w", err)
+		}
+		// CancelConversation early-returns without clearing the flag when there
+		// is no in-memory loop (e.g. a hydrated manager with a stale persisted
+		// agent_working=true). Clear it defensively so the change never leaves
+		// the thinking indicator stuck on.
+		if cm.IsAgentWorking() {
+			cm.SetAgentWorking(false)
+		}
+	} else {
+		cm.ResetLoop()
+	}
+	return cm.recordModelChangeMarker(ctx, buildModelChangeUserData(ch))
+}
+
+// buildModelChangeUserData assembles the marker payload (structured fields plus
+// a human-readable one-line summary) for an applied model/reasoning change.
+func buildModelChangeUserData(ch ModelSettingsChange) ModelChangeUserData {
+	ud := ModelChangeUserData{
+		From:        ch.OldModel,
+		To:          ch.NewModel,
+		FromDisplay: ch.OldModelDisplay,
+		ToDisplay:   ch.NewModelDisplay,
+	}
+
+	// Prefer the human-friendly name in the summary sentence, falling back to
+	// the raw id when no display name is known.
+	oldName := ch.OldModel
+	if ch.OldModelDisplay != "" {
+		oldName = ch.OldModelDisplay
+	}
+	newName := ch.NewModel
+	if ch.NewModelDisplay != "" {
+		newName = ch.NewModelDisplay
+	}
+
+	var parts []string
+	if ch.NewModel != "" {
+		if ch.OldModel == "" {
+			parts = append(parts, fmt.Sprintf("Model set to %s", newName))
+		} else {
+			parts = append(parts, fmt.Sprintf("model changed from %s to %s", oldName, newName))
+		}
+	}
+	if ch.ReasoningSet {
+		ud.ReasoningFrom = reasoningDisplayName(ch.OldReasoning)
+		ud.ReasoningTo = reasoningDisplayName(ch.NewReasoning)
+		parts = append(parts, fmt.Sprintf("reasoning changed from %s to %s", ud.ReasoningFrom, ud.ReasoningTo))
+	}
+
+	summary := strings.Join(parts, "; ")
+	if summary != "" {
+		// Capitalize the first letter for a clean sentence when the model part
+		// (which is already capitalized) is absent.
+		summary = strings.ToUpper(summary[:1]) + summary[1:] + "."
+	}
+	ud.Text = summary
+	return ud
+}
+
+// reasoningDisplayName maps a stored reasoning level to a user-facing name,
+// rendering the empty (service-default) value as "default".
+func reasoningDisplayName(level string) string {
+	if level == "" {
+		return "default"
+	}
+	return level
+}
+
+// recordModelCommandInfo records an informational modelchange marker (bare
+// /model output, already-using notice, or an error) that does not switch the
+// model. From and To are left empty.
+func (cm *ConversationManager) recordModelCommandInfo(ctx context.Context, text string) error {
+	return cm.recordModelChangeMarker(ctx, ModelChangeUserData{Text: text})
+}
+
+// recordModelChangeMarker persists and broadcasts a modelchange marker.
+func (cm *ConversationManager) recordModelChangeMarker(ctx context.Context, userData ModelChangeUserData) error {
+	message := llm.Message{
+		Role:    llm.MessageRoleAssistant,
+		Content: []llm.Content{{Type: llm.ContentTypeText, Text: userData.Text}},
+	}
+
+	createdMsg, err := cm.db.CreateMessage(ctx, db.CreateMessageParams{
+		ConversationID:      cm.conversationID,
+		Type:                db.MessageTypeModelChange,
+		LLMData:             message,
+		UserData:            userData,
+		UsageData:           llm.Usage{},
+		ExcludedFromContext: true,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to record model change: %w", err)
+	}
+	cm.Touch()
+
+	var conversation generated.Conversation
+	err = cm.db.Queries(ctx, func(q *generated.Queries) error {
+		var qerr error
+		conversation, qerr = q.GetConversation(ctx, cm.conversationID)
+		return qerr
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get conversation for model change notification: %w", err)
+	}
+	cm.publishStream(createdMsg.SequenceID, StreamResponse{
+		Messages:     toAPIMessages([]generated.Message{*createdMsg}),
+		Conversation: &conversation,
+	})
+	return nil
 }
 
 // notifyGitStateChange publishes a gitinfo message to subscribers.

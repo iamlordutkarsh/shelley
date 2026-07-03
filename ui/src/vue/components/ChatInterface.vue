@@ -160,6 +160,7 @@
               <ModelBar
                 :key="block.modelBar.key"
                 :model="block.modelBar.model"
+                :models-used="block.modelBar.modelsUsed"
                 :models="models"
                 :thinking-level="conversationThinkingLevel"
               />
@@ -280,6 +281,7 @@
       :initial-rows="messageInputInitialRows"
       :conversation-id="conversationId"
       :lazy-draft-id="lazyDraftId"
+      :model-options="readyModelIds"
       @clear-injected-text="
         diffCommentText = '';
         terminalInjectedText = null;
@@ -501,6 +503,9 @@ const models = ref<
     max_context_tokens?: number;
   }>
 >(window.__SHELLEY_INIT__?.models || []);
+
+// Ready model ids, surfaced to MessageInput for /model argument autocomplete.
+const readyModelIds = computed(() => models.value.filter((m) => m.ready).map((m) => m.id));
 
 const THINKING_LEVEL_KEY = "shelley.thinkingLevel";
 const thinkingLevel = ref<ThinkingLevel>(
@@ -751,6 +756,10 @@ const renderModel = computed<GenerationBlock[]>(() => {
   const currentGeneration = props.currentConversation?.current_generation || 1;
   const systemMessagesByGeneration = new Map<number, Message[]>();
   const modelsByGeneration = new Map<number, string>();
+  // All distinct models a generation actually ran, in first-seen order, so the
+  // ModelBar can show "Mixed" (with the list on hover) once /model switched the
+  // model partway through a generation. The first entry is the starting model.
+  const modelsUsedByGeneration = new Map<number, string[]>();
   const itemsByGeneration = new Map<number, CoalescedItem[]>();
   const generationSet = new Set<number>();
 
@@ -761,13 +770,22 @@ const renderModel = computed<GenerationBlock[]>(() => {
       existing.push(message);
       systemMessagesByGeneration.set(message.generation, existing);
     }
-    if (!modelsByGeneration.has(message.generation) && message.usage_data) {
+    if (message.usage_data) {
       try {
         const usage =
           typeof message.usage_data === "string"
             ? JSON.parse(message.usage_data)
             : message.usage_data;
-        if (usage?.model) modelsByGeneration.set(message.generation, usage.model);
+        if (usage?.model) {
+          if (!modelsByGeneration.has(message.generation)) {
+            modelsByGeneration.set(message.generation, usage.model);
+          }
+          const used = modelsUsedByGeneration.get(message.generation) || [];
+          if (!used.includes(usage.model)) {
+            used.push(usage.model);
+            modelsUsedByGeneration.set(message.generation, used);
+          }
+        }
       } catch {
         /* ignore */
       }
@@ -944,6 +962,7 @@ const renderModel = computed<GenerationBlock[]>(() => {
       modelBar: {
         key: `model-bar-${generation}`,
         model: modelsByGeneration.get(generation) || props.currentConversation?.model,
+        modelsUsed: modelsUsedByGeneration.get(generation) || [],
       },
       systemPrompts: (systemMessagesByGeneration.get(generation) || []).map((m) => ({
         key: `system-prompt-${m.message_id}`,
@@ -1237,6 +1256,29 @@ async function sendMessage(message: string) {
 
   if (trimmedMessage === SLASH_COMMANDS.FORK.command) {
     await forkConversation();
+    return;
+  }
+  // /model is handled server-side synchronously (it switches the model and
+  // returns immediately without starting a turn), so it must NOT flip the
+  // agent-working state — otherwise "Agent working..." would stick on. Send it
+  // like a normal message but skip the working indicator.
+  if (
+    (trimmedMessage === "/model" || trimmedMessage.startsWith("/model ")) &&
+    props.conversationId
+  ) {
+    try {
+      sending.value = true;
+      error.value = null;
+      await api.sendMessage(props.conversationId, {
+        message: trimmedMessage,
+        model: selectedModel.value,
+      });
+    } catch (err) {
+      console.error("Failed to run /model:", err);
+      error.value = err instanceof Error ? err.message : "Unknown error";
+    } finally {
+      sending.value = false;
+    }
     return;
   }
   if (trimmedMessage === SLASH_COMMANDS.DIFF.command) {
@@ -1645,9 +1687,12 @@ const statusContentProps = computed(() => ({
 
 // ============ effects / watchers ============
 
-// Sync selected model from conversation when switching to an existing one.
+// Sync selected model from the conversation: both when switching to an existing
+// one AND when its model changes underneath us (e.g. a mid-conversation /model
+// switch, which the server broadcasts on the conversation stream). Without the
+// latter, the status/details would keep showing the old model after /model.
 watch(
-  () => props.currentConversation?.conversation_id,
+  () => [props.currentConversation?.conversation_id, props.currentConversation?.model] as const,
   () => {
     if (props.currentConversation?.model) setSelectedModel(props.currentConversation.model);
   },

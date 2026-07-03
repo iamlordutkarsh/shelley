@@ -16,6 +16,9 @@
   <!-- warning -->
   <WarningMessage v-else-if="message.type === 'warning'" :message="message" />
 
+  <!-- modelchange -->
+  <ModelChangeMessage v-else-if="message.type === 'modelchange'" :message="message" />
+
   <!-- gitinfo -->
   <GitInfoMessage
     v-else-if="message.type === 'gitinfo'"
@@ -213,6 +216,7 @@ import MessageInfoModal from "./MessageInfoModal.vue";
 import EditableFileModal from "./EditableFileModal.vue";
 import GitInfoMessage from "./GitInfoMessage.vue";
 import WarningMessage from "./WarningMessage.vue";
+import ModelChangeMessage from "./ModelChangeMessage.vue";
 import DistillStatusMessage from "./DistillStatusMessage.vue";
 import ErrorRetryButton from "./ErrorRetryButton.vue";
 import MessageContentBlock from "./MessageContentBlock.vue";

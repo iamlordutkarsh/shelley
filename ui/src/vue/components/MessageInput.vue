@@ -121,6 +121,31 @@
           </button>
         </div>
         <div
+          v-if="showModelArgMenu"
+          ref="slashMenuRef"
+          class="slash-command-menu"
+          role="listbox"
+          aria-label="Model options"
+          data-testid="model-arg-menu"
+        >
+          <button
+            v-for="(item, index) in modelArgSuggestions"
+            :key="`${item.kind}:${item.value}`"
+            type="button"
+            :class="`slash-command-item${index === slashMenuSelectedIndex ? ' selected' : ''}`"
+            role="option"
+            :aria-selected="index === slashMenuSelectedIndex"
+            @mousedown.prevent
+            @mouseenter="slashMenuSelectedIndex = index"
+            @click="chooseModelArg(index)"
+          >
+            <span class="slash-command-name">{{ item.value }}</span>
+            <span class="slash-command-description">{{
+              item.kind === "model" ? "model" : "reasoning level"
+            }}</span>
+          </button>
+        </div>
+        <div
           v-if="isShellMode"
           class="shell-mode-indicator"
           title="This will run as a shell command"
@@ -287,6 +312,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { useI18n } from "../composables/i18n";
 import { pickPlaceholderHint } from "../../utils/placeholderHints";
 import { SLASH_COMMANDS } from "../../utils/slashCommands";
+import { THINKING_LEVELS } from "./thinkingLevel";
 
 // Web Speech API types
 interface SpeechRecognitionEvent extends Event {
@@ -370,6 +396,8 @@ const props = withDefaults(
      * attachments. React encodes this exact carve-out in its key:
      * `(conversationId === lazyDraftId ? null : conversationId) || "new"`. */
     lazyDraftId?: string | null;
+    /** Ready model ids, used to autocomplete the /model command arguments. */
+    modelOptions?: string[];
   }>(),
   {
     showQueueOption: false,
@@ -718,6 +746,91 @@ const showSlashMenu = computed(
     !isShellMode.value,
 );
 
+// --- /model argument autocomplete ---------------------------------------
+// Once "/model " has been typed, offer the ready model ids plus the reasoning
+// levels as completions for the token currently under the cursor. This mirrors
+// the command grammar: /model <id> and/or <level>, order independent.
+interface ModelArgOption {
+  value: string;
+  kind: "model" | "level";
+}
+const modelArgOptions = computed<ModelArgOption[]>(() => [
+  ...(props.modelOptions ?? []).map((id) => ({ value: id, kind: "model" as const })),
+  ...THINKING_LEVELS.map((l) => ({ value: l.value, kind: "level" as const })),
+]);
+// Matches "/model <args...>" with at least one trailing space (i.e. the user is
+// past the command name and into the arguments). Captures everything after it.
+const modelArgContext = computed(() => {
+  const m = message.value.match(/^\/model\s+(.*)$/s);
+  if (m === null) return null;
+  const rest = m[1];
+  // The token under the cursor is the final whitespace-delimited chunk; the
+  // preceding tokens are already-entered arguments we must not re-suggest.
+  const priorEnd = rest.replace(/\S*$/, "");
+  const partial = rest.slice(priorEnd.length);
+  const prior = priorEnd.trim().split(/\s+/).filter(Boolean);
+  return { partial, prior };
+});
+const modelArgSuggestions = computed<ModelArgOption[]>(() => {
+  const ctx = modelArgContext.value;
+  if (ctx === null) return [];
+  // Normalize dots to dashes so "opus-4.8" and "opus-4-8" both match, mirroring
+  // the server's lenient resolver.
+  const norm = (s: string) => s.toLowerCase().replace(/\./g, "-");
+  const q = norm(ctx.partial);
+  const priorLower = new Set(ctx.prior.map((t) => t.toLowerCase()));
+  const usedModel = ctx.prior.some((t) => (props.modelOptions ?? []).includes(t));
+  const usedLevel = ctx.prior.some((t) => THINKING_LEVELS.some((l) => l.value === t));
+  const matched = modelArgOptions.value.filter((o) => {
+    if (priorLower.has(o.value.toLowerCase())) return false;
+    // Only one model and one level may be chosen.
+    if (o.kind === "model" && usedModel) return false;
+    if (o.kind === "level" && usedLevel) return false;
+    // Models match on any substring (so "opus" surfaces "claude-opus-4.8");
+    // levels match on prefix (they're short and prefix is unambiguous enough).
+    return o.kind === "model" ? norm(o.value).includes(q) : o.value.toLowerCase().startsWith(q);
+  });
+  // Rank prefix matches ahead of mid-string substring matches so the closest
+  // completions come first.
+  return matched.sort((a, b) => {
+    const ap = norm(a.value).startsWith(q) ? 0 : 1;
+    const bp = norm(b.value).startsWith(q) ? 0 : 1;
+    return ap - bp;
+  });
+});
+const showModelArgMenu = computed(
+  () =>
+    modelArgContext.value !== null &&
+    !slashMenuDismissed.value &&
+    modelArgSuggestions.value.length > 0 &&
+    !isDisabled.value,
+);
+// Whether the token under the cursor is already a complete, valid argument
+// (an exact model id or reasoning level, dot/dash- and case-insensitive). When
+// it is, Enter should send the command rather than "completing" the token (which
+// would only append a space and force a second Enter).
+const partialIsCompleteOption = computed(() => {
+  const ctx = modelArgContext.value;
+  if (ctx === null || ctx.partial === "") return false;
+  const norm = (s: string) => s.toLowerCase().replace(/\./g, "-");
+  const p = norm(ctx.partial);
+  return modelArgOptions.value.some((o) => norm(o.value) === p);
+});
+function chooseModelArg(index: number) {
+  const opt = modelArgSuggestions.value[index];
+  const ctx = modelArgContext.value;
+  if (!opt || ctx === null) return;
+  // Replace the partial token under the cursor with the full option + a space,
+  // so the next argument can be typed/autocompleted immediately.
+  const withoutPartial = ctx.partial === "" ? message.value : message.value.slice(0, -ctx.partial.length);
+  setMessage(`${withoutPartial}${opt.value} `);
+  requestAnimationFrame(() => textareaRef.value?.focus());
+}
+
+watch(modelArgContext, () => {
+  slashMenuSelectedIndex.value = 0;
+});
+
 watch(slashQuery, () => {
   slashMenuSelectedIndex.value = 0;
 });
@@ -759,8 +872,8 @@ function onSlashMenuOutside(e: MouseEvent) {
   slashMenuDismissed.value = true;
 }
 
-watch(showSlashMenu, (open) => {
-  if (open) document.addEventListener("mousedown", onSlashMenuOutside);
+watch([showSlashMenu, showModelArgMenu], ([a, b]) => {
+  if (a || b) document.addEventListener("mousedown", onSlashMenuOutside);
   else document.removeEventListener("mousedown", onSlashMenuOutside);
 });
 
@@ -866,6 +979,39 @@ function handleKeyDown(e: KeyboardEvent) {
     if (e.key === "Enter" || e.key === "Tab") {
       e.preventDefault();
       void chooseSlashCommand(slashMenuSelectedIndex.value);
+      return;
+    }
+  }
+  if (showModelArgMenu.value) {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      slashMenuSelectedIndex.value =
+        (slashMenuSelectedIndex.value + 1) % modelArgSuggestions.value.length;
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      slashMenuSelectedIndex.value =
+        (slashMenuSelectedIndex.value - 1 + modelArgSuggestions.value.length) %
+        modelArgSuggestions.value.length;
+      return;
+    }
+    // Tab always completes the highlighted option. Enter completes only when
+    // the token under the cursor is a genuine partial (not yet a full option),
+    // so users can chain arguments; once the token is a complete, valid option
+    // (e.g. "/model low"), Enter falls through and sends the command.
+    if (e.key === "Tab") {
+      e.preventDefault();
+      chooseModelArg(slashMenuSelectedIndex.value);
+      return;
+    }
+    if (
+      e.key === "Enter" &&
+      modelArgContext.value?.partial !== "" &&
+      !partialIsCompleteOption.value
+    ) {
+      e.preventDefault();
+      chooseModelArg(slashMenuSelectedIndex.value);
       return;
     }
   }

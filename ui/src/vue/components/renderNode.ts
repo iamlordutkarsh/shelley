@@ -15,7 +15,7 @@ export interface GenerationBlock {
   generation: number;
   divider?: { from: number; to: number };
   sectionClass: string;
-  modelBar: { key: string; model?: string | null };
+  modelBar: { key: string; model?: string | null; modelsUsed: string[] };
   systemPrompts: { key: string; message: Message }[];
   nodes: RenderNode[];
 }

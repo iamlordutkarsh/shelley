@@ -5,7 +5,7 @@
     <div class="model-bar-summary">
       <span class="model-bar-icon">🤖</span>
       <span class="model-bar-label">Model</span>
-      <span class="model-bar-name">{{ displayName }}</span>
+      <span class="model-bar-name" :title="modelTitle">{{ displayName }}</span>
       <span class="model-bar-label" title="Reasoning effort">Reasoning</span>
       <span class="model-bar-name">{{ effectiveReasoning }}</span>
     </div>
@@ -19,10 +19,14 @@ import type { Model } from "../../types";
 const props = withDefaults(
   defineProps<{
     model?: string | null;
+    // Every distinct model the generation actually ran, first-seen order (the
+    // first is the starting model). When it holds more than one, the bar shows
+    // "Mixed" instead of a single name.
+    modelsUsed?: string[];
     models?: Model[];
     thinkingLevel?: string | null;
   }>(),
-  { models: () => [] },
+  { models: () => [], modelsUsed: () => [] },
 );
 
 // Resolve the models[] entry for this bar. The bar's `model` is often the
@@ -30,17 +34,34 @@ const props = withDefaults(
 // models list is keyed by Shelley id (e.g. "claude-opus-4.8"). Match exactly
 // first, then tolerate the dot/dash spelling difference so both the display
 // name and the reasoning default resolve.
+const norm = (s: string) => s.replace(/\./g, "-");
+function resolveDisplayName(want: string | null | undefined): string | null | undefined {
+  if (!want) return want;
+  const obj =
+    props.models.find((m) => m.id === want) ||
+    props.models.find((m) => norm(m.id) === norm(want));
+  return obj?.display_name || want;
+}
+
 const modelObj = computed(() => {
   const want = props.model;
   if (!want) return undefined;
-  const norm = (s: string) => s.replace(/\./g, "-");
   return (
     props.models.find((m) => m.id === want) ||
     props.models.find((m) => norm(m.id) === norm(want))
   );
 });
 
-const displayName = computed(() => modelObj.value?.display_name || props.model);
+// A generation that ran more than one model (via a mid-generation /model
+// switch) shows "Mixed"; the full list is on hover. Otherwise show the single
+// model's display name.
+const isMixed = computed(() => props.modelsUsed.length > 1);
+const displayName = computed(() =>
+  isMixed.value ? "Mixed" : modelObj.value?.display_name || props.model,
+);
+const modelTitle = computed(() =>
+  isMixed.value ? props.modelsUsed.map((m) => resolveDisplayName(m)).join(" \u2192 ") : undefined,
+);
 
 // The reasoning badge is always shown so a conversation never hides how much
 // thinking it actually uses. An explicit per-conversation thinking_level wins;

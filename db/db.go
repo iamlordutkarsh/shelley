@@ -1048,6 +1048,9 @@ const (
 	MessageTypeError   MessageType = "error"
 	MessageTypeGitInfo MessageType = "gitinfo" // user-visible only, not sent to LLM
 	MessageTypeWarning MessageType = "warning" // user-visible only, not sent to LLM
+	// MessageTypeModelChange marks where the conversation switched models via
+	// the /model command. User-visible only, never sent to the LLM.
+	MessageTypeModelChange MessageType = "modelchange"
 )
 
 // CreateMessageParams contains parameters for creating a message

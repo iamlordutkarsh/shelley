@@ -103,6 +103,14 @@ export interface ConversationWithStateForTS {
   max_sequence_id: number;
 }
 
-export type MessageType = "user" | "agent" | "tool" | "error" | "system" | "gitinfo" | "warning";
+export type MessageType =
+  | "user"
+  | "agent"
+  | "tool"
+  | "error"
+  | "system"
+  | "gitinfo"
+  | "warning"
+  | "modelchange";
 
 export type EventType = string;

@@ -107,7 +107,7 @@ export function coalesceMessages(messages: Message[]): CoalescedItem[] {
       return;
     }
 
-    if (message.type === "error" || message.type === "warning") {
+    if (message.type === "error" || message.type === "warning" || message.type === "modelchange") {
       items.push({ type: "message", generation: message.generation, carried, message });
       return;
     }
