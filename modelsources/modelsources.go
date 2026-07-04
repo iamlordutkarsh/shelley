@@ -113,6 +113,27 @@ func Env(anthropicKey, openAIKey, geminiKey, fireworksKey string) Source {
 	return Source{label: "env", providers: prov, providerLabels: labels}
 }
 
+// ZAIEnv returns a Source for z.ai Coding Plan models using ZAI_API_KEY.
+// z.ai models are catalogued with ProviderOpenAI but use a distinct base
+// URL and API key, so they need their own source to avoid being claimed
+// by the generic OpenAI env source with the wrong key.
+func ZAIEnv(zaiKey string) Source {
+	if zaiKey == "" {
+		return Source{}
+	}
+	return Source{
+		label: "$ZAI_API_KEY",
+		providers: map[models.Provider]*providerConn{
+			models.ProviderOpenAI: {apiKey: zaiKey},
+		},
+		allowedAPIModels: map[string]bool{
+			"glm-5.2": true,
+			"glm-5.1": true,
+			"glm-4.6": true,
+		},
+	}
+}
+
 // LLMIntegration returns a Source backed by one exe.dev "llm"
 // integration. idSuffix, when non-empty, is appended to each
 // materialized model ID to disambiguate multiple integrations.

@@ -26,6 +26,7 @@ const (
 	GeminiURL    = "https://generativelanguage.googleapis.com/v1beta/openai/"
 	MistralURL   = "https://api.mistral.ai/v1"
 	MoonshotURL  = "https://api.moonshot.ai/v1"
+	ZAIURL       = "https://api.z.ai/api/coding/paas/v4"
 
 	// Environment variable names for API keys
 	OpenAIAPIKeyEnv    = "OPENAI_API_KEY"
@@ -35,6 +36,7 @@ const (
 	GeminiAPIKeyEnv    = "GEMINI_API_KEY"
 	MistralAPIKeyEnv   = "MISTRAL_API_KEY"
 	MoonshotAPIKeyEnv  = "MOONSHOT_API_KEY"
+	ZAIAPIKeyEnv       = "ZAI_API_KEY"
 )
 
 //exe:completeinit
@@ -328,6 +330,36 @@ var (
 		SupportsImages:     false,
 	}
 
+	GLM52ZAI = Model{
+		UserName:           "glm-5.2-zai",
+		ModelName:          "glm-5.2",
+		URL:                ZAIURL,
+		APIKeyEnv:          ZAIAPIKeyEnv,
+		IsReasoningModel:   false,
+		UseSimplifiedPatch: false,
+		SupportsImages:     false,
+	}
+
+	GLM51ZAI = Model{
+		UserName:           "glm-5.1-zai",
+		ModelName:          "glm-5.1",
+		URL:                ZAIURL,
+		APIKeyEnv:          ZAIAPIKeyEnv,
+		IsReasoningModel:   false,
+		UseSimplifiedPatch: false,
+		SupportsImages:     false,
+	}
+
+	GLM46ZAI = Model{
+		UserName:           "glm-4.6-zai",
+		ModelName:          "glm-4.6",
+		URL:                ZAIURL,
+		APIKeyEnv:          ZAIAPIKeyEnv,
+		IsReasoningModel:   false,
+		UseSimplifiedPatch: false,
+		SupportsImages:     false,
+	}
+
 	KimiK26Fireworks = Model{
 		UserName:           "kimi-k2.6-fireworks",
 		ModelName:          "accounts/fireworks/models/kimi-k2p6",
@@ -552,6 +584,9 @@ var ModelsRegistry = []Model{
 	DevstralSmall,
 	GLM52Fireworks,
 	GLM51Fireworks,
+	GLM52ZAI,
+	GLM51ZAI,
+	GLM46ZAI,
 	KimiK26Fireworks,
 	Qwen36PlusFireworks,
 	GPTOSS120B,
@@ -1094,6 +1129,8 @@ func (s *Service) TokenContextWindow() int {
 	case "o3-2025-04-16", "o3-mini-2025-04-16":
 		return 200000 // 200k for O3 models
 	case "glm":
+		return 128000
+	case "glm-5.2", "glm-5.1", "glm-4.6":
 		return 128000
 	case "qwen":
 		return 256000

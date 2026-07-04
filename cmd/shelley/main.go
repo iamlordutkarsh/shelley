@@ -412,6 +412,7 @@ func buildLLMModelSources(ctx context.Context, global GlobalConfig, logger *slog
 	openAIKey := os.Getenv("OPENAI_API_KEY")
 	geminiKey := os.Getenv("GEMINI_API_KEY")
 	fireworksKey := os.Getenv("FIREWORKS_API_KEY")
+	zaiKey := os.Getenv("ZAI_API_KEY")
 
 	var sources []modelsources.Source
 
@@ -464,6 +465,9 @@ func buildLLMModelSources(ctx context.Context, global GlobalConfig, logger *slog
 		if geminiKey != "" {
 			sources = append(sources, modelsources.Env("", "", geminiKey, ""))
 		}
+		if zaiKey != "" {
+			sources = append(sources, modelsources.ZAIEnv(zaiKey))
+		}
 	} else if gateway != "" {
 		logger.Info("Using LLM gateway", "gateway", gateway)
 		sources = append(sources, modelsources.Gateway(gateway, anthropicKey, openAIKey, fireworksKey))
@@ -472,8 +476,16 @@ func buildLLMModelSources(ctx context.Context, global GlobalConfig, logger *slog
 		if geminiKey != "" {
 			sources = append(sources, modelsources.Env("", "", geminiKey, ""))
 		}
-	} else if anthropicKey != "" || openAIKey != "" || geminiKey != "" || fireworksKey != "" {
+		if zaiKey != "" {
+			sources = append(sources, modelsources.ZAIEnv(zaiKey))
+		}
+	} else if anthropicKey != "" || openAIKey != "" || geminiKey != "" || fireworksKey != "" || zaiKey != "" {
 		// 3. Env vars.
+		// 3a. z.ai gets its own source so z.ai models use ZAI_API_KEY
+		//     instead of OPENAI_API_KEY.
+		if zaiKey != "" {
+			sources = append(sources, modelsources.ZAIEnv(zaiKey))
+		}
 		sources = append(sources, modelsources.Env(anthropicKey, openAIKey, geminiKey, fireworksKey))
 	}
 

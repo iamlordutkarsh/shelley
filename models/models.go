@@ -242,6 +242,24 @@ func All() []Model {
 			Build: oaiChatSvc(oai.GLM51Fireworks, "fireworks"),
 		},
 		{
+			ID: "glm-5.2-zai", Provider: ProviderOpenAI,
+			Description: "GLM-5.2 (z.ai Coding Plan)", APIModelName: oai.GLM52ZAI.ModelName,
+			APIType: APITypeOpenAIChat, DefaultBaseURL: "https://api.z.ai/api/coding/paas/v4",
+			Build: oaiChatSvc(oai.GLM52ZAI, "zai"),
+		},
+		{
+			ID: "glm-5.1-zai", Provider: ProviderOpenAI,
+			Description: "GLM-5.1 (z.ai Coding Plan)", APIModelName: oai.GLM51ZAI.ModelName,
+			APIType: APITypeOpenAIChat, DefaultBaseURL: "https://api.z.ai/api/coding/paas/v4",
+			Build: oaiChatSvc(oai.GLM51ZAI, "zai"),
+		},
+		{
+			ID: "glm-4.6-zai", Provider: ProviderOpenAI,
+			Description: "GLM-4.6 (z.ai Coding Plan)", APIModelName: oai.GLM46ZAI.ModelName,
+			APIType: APITypeOpenAIChat, DefaultBaseURL: "https://api.z.ai/api/coding/paas/v4",
+			Build: oaiChatSvc(oai.GLM46ZAI, "zai"),
+		},
+		{
 			ID: "gemini-3-pro", Provider: ProviderGemini,
 			Description: "Gemini 3 Pro", APIModelName: "gemini-3-pro-preview",
 			APIType: APITypeGemini, DefaultBaseURL: DefaultGeminiBaseURL,
